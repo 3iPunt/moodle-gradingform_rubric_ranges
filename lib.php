@@ -77,6 +77,11 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
         $node->add(get_string('definerubric', 'gradingform_rubric_ranges'),
             $this->get_editor_url(), settings_navigation::TYPE_CUSTOM,
             null, null, new pix_icon('icon', '', 'gradingform_rubric_ranges'));
+        // IED extension: site settings page (core does not load settings.php for gradingform plugins).
+        if (has_capability('moodle/site:config', context_system::instance())) {
+            $node->add(get_string('settingspage', 'gradingform_rubric_ranges'),
+                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'), settings_navigation::TYPE_CUSTOM);
+        }
     }
 
     /**

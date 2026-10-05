@@ -15,18 +15,22 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Version information for plugin gradingform_rubric_ranges
+ * Capability definitions for gradingform_rubric_ranges.
  *
  * @package    gradingform_rubric_ranges
- * @copyright  2022 Heena Agheda <heenaagheda@catalyst-au.net>
+ * @copyright  2026 Tresipunt
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 defined('MOODLE_INTERNAL') || die();
 
-$plugin->component = 'gradingform_rubric_ranges';
-$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
-$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
-$plugin->requires = 2023042400;    // Requires Moodle 4.2.0 or later.
-$plugin->maturity = MATURITY_STABLE;
-$plugin->supported = [402, 405];
+$capabilities = [
+    // Academic validation of a grade given with a ranged rubric.
+    // Not granted to any archetype: it is assigned manually to the validator role.
+    'gradingform/rubric_ranges:validate' => [
+        'riskbitmask' => RISK_PERSONAL,
+        'captype' => 'write',
+        'contextlevel' => CONTEXT_MODULE,
+        'archetypes' => [],
+    ],
+];

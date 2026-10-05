@@ -14,19 +14,38 @@
 // You should have received a copy of the GNU General Public License
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
+namespace gradingform_rubric_ranges\persistent;
+
+use core\persistent;
+
 /**
- * Version information for plugin gradingform_rubric_ranges
+ * Weight of a rubric criterion (table gradingform_rubric_ranges_w).
+ *
+ * Data access only: business rules live in \gradingform_rubric_ranges\local\weights.
  *
  * @package    gradingform_rubric_ranges
- * @copyright  2022 Heena Agheda <heenaagheda@catalyst-au.net>
+ * @copyright  2026 Tresipunt
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
+class criterion_weight extends persistent {
 
-defined('MOODLE_INTERNAL') || die();
+    /** @var string Table name. */
+    const TABLE = 'gradingform_rubric_ranges_w';
 
-$plugin->component = 'gradingform_rubric_ranges';
-$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
-$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
-$plugin->requires = 2023042400;    // Requires Moodle 4.2.0 or later.
-$plugin->maturity = MATURITY_STABLE;
-$plugin->supported = [402, 405];
+    /**
+     * Return the definition of the properties of this model.
+     *
+     * @return array
+     */
+    protected static function define_properties() {
+        return [
+            'criterionid' => [
+                'type' => PARAM_INT,
+            ],
+            'weight' => [
+                'type' => PARAM_INT,
+                'default' => 1,
+            ],
+        ];
+    }
+}

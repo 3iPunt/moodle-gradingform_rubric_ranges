@@ -15,18 +15,19 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Version information for plugin gradingform_rubric_ranges
+ * Post installation steps for gradingform_rubric_ranges.
  *
  * @package    gradingform_rubric_ranges
- * @copyright  2022 Heena Agheda <heenaagheda@catalyst-au.net>
+ * @copyright  2026 Tresipunt
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-defined('MOODLE_INTERNAL') || die();
-
-$plugin->component = 'gradingform_rubric_ranges';
-$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
-$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
-$plugin->requires = 2023042400;    // Requires Moodle 4.2.0 or later.
-$plugin->maturity = MATURITY_STABLE;
-$plugin->supported = [402, 405];
+/**
+ * Stores the default value (disabled) of the IED feature flags.
+ *
+ * @return bool
+ */
+function xmldb_gradingform_rubric_ranges_install() {
+    \gradingform_rubric_ranges\local\features::set_defaults();
+    return true;
+}

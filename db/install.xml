@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<XMLDB PATH="grade/grading/form/rubric_ranges/db" VERSION="20120122" COMMENT="XMLDB file for Monash Rubric Ranges"
+<XMLDB PATH="grade/grading/form/rubric_ranges/db" VERSION="20261005" COMMENT="XMLDB file for Monash Rubric Ranges"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:noNamespaceSchemaLocation="../../../../../lib/xmldb/xmldb.xsd"
 >
@@ -49,6 +49,55 @@
       </KEYS>
       <INDEXES>
         <INDEX NAME="ix_levelid" UNIQUE="false" FIELDS="levelid" COMMENT="levelid acts as a foreign key but null values are allowed"/>
+      </INDEXES>
+    </TABLE>
+    <TABLE NAME="gradingform_rubric_ranges_w" COMMENT="Stores the weight of each criterion in the final grade">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="criterionid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The rubric criterion this weight belongs to"/>
+        <FIELD NAME="weight" TYPE="int" LENGTH="2" NOTNULL="true" DEFAULT="1" SEQUENCE="false" COMMENT="Relative weight of the criterion (1-10)"/>
+        <FIELD NAME="usermodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+        <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+        <KEY NAME="fk_criterionid" TYPE="foreign-unique" FIELDS="criterionid" REFTABLE="gradingform_rubric_ranges_c" REFFIELDS="id"/>
+        <KEY NAME="fk_usermodified" TYPE="foreign" FIELDS="usermodified" REFTABLE="user" REFFIELDS="id"/>
+      </KEYS>
+    </TABLE>
+    <TABLE NAME="gradingform_rubric_ranges_h" COMMENT="Validation history: original teacher filling replaced by a validator">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="itemid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The graded item (grading_instances.itemid), stable across grading instances"/>
+        <FIELD NAME="instanceid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The grading instance where the validation was saved"/>
+        <FIELD NAME="criterionid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The rubric criterion"/>
+        <FIELD NAME="teacherlevelid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Level selected by the teacher before the validation"/>
+        <FIELD NAME="teachergrade" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Grade given by the teacher before the validation"/>
+        <FIELD NAME="teacherremark" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Feedback given by the teacher before the validation"/>
+        <FIELD NAME="teacherremarkformat" TYPE="int" LENGTH="2" NOTNULL="false" SEQUENCE="false" COMMENT="The format of the teacher feedback"/>
+        <FIELD NAME="teacherid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="The teacher who gave the original grade"/>
+        <FIELD NAME="validatedlevelid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Level resulting from the validation"/>
+        <FIELD NAME="validatedgrade" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Grade given by the validator"/>
+        <FIELD NAME="validatedremark" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Feedback given by the validator"/>
+        <FIELD NAME="validatorid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The user who validated the grade"/>
+        <FIELD NAME="timevalidated" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="When the grade was validated"/>
+        <FIELD NAME="usermodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+        <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+        <KEY NAME="fk_usermodified" TYPE="foreign" FIELDS="usermodified" REFTABLE="user" REFFIELDS="id"/>
+        <KEY NAME="fk_instanceid" TYPE="foreign" FIELDS="instanceid" REFTABLE="grading_instances" REFFIELDS="id"/>
+        <KEY NAME="fk_criterionid" TYPE="foreign" FIELDS="criterionid" REFTABLE="gradingform_rubric_ranges_c" REFFIELDS="id"/>
+        <KEY NAME="fk_teacherid" TYPE="foreign" FIELDS="teacherid" REFTABLE="user" REFFIELDS="id"/>
+        <KEY NAME="fk_validatorid" TYPE="foreign" FIELDS="validatorid" REFTABLE="user" REFFIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="uq_itemid_criterionid" UNIQUE="true" FIELDS="itemid, criterionid" COMMENT="A grade can only be validated once"/>
+        <INDEX NAME="ix_teacherlevelid" UNIQUE="false" FIELDS="teacherlevelid" COMMENT="teacherlevelid acts as a foreign key but null values are allowed"/>
+        <INDEX NAME="ix_validatedlevelid" UNIQUE="false" FIELDS="validatedlevelid" COMMENT="validatedlevelid acts as a foreign key but null values are allowed"/>
       </INDEXES>
     </TABLE>
   </TABLES>

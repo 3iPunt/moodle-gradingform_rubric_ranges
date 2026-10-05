@@ -108,3 +108,15 @@ $string['sortlevelsasc0'] = 'Descending by number of points';
 $string['sortlevelsasc1'] = 'Ascending by number of points';
 $string['zerolevelsabsent'] = 'Warning: The minimum possible score for this rubric is not 0; this can result in unexpected grades for the activity. To avoid this, each criterion should have a level with 0 points.<br>
 This warning may be ignored if a scale is used for grading, and the minimum levels in the rubric correspond to the minimum value of the scale.';
+
+// IED extension strings.
+$string['enablenumericgrading'] = 'Enable numeric grading';
+$string['enablenumericgrading_help'] = 'If enabled, the grader enters a numeric grade for every criterion. The matching level is selected automatically and its definition is proposed as feedback, which can be edited.';
+$string['enablevalidation'] = 'Enable academic validation';
+$string['enablevalidation_help'] = 'If enabled, users with the capability \'gradingform/rubric_ranges:validate\' can validate a grade once: the validator grade and feedback replace the teacher ones, which are kept in the validation history.';
+$string['enableweighting'] = 'Enable criteria weighting';
+$string['enableweighting_help'] = 'If enabled, every criterion has a weight from 1 to 10 and the final grade is the weighted average of the criteria. When all criteria have the same weight and maximum score the grade is the same as without weighting.';
+$string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
+$string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
+$string['settingspage'] = 'Ranged rubric settings';
+$string['settingssaved'] = 'Changes saved';
