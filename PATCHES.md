@@ -28,6 +28,7 @@ One commit per task, applied in order:
 | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
 | `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
 | `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
+| `0004-T3-…` | Academic validation with history and `grade_validated` event |
 
 Further patches are added as each task is delivered.
 
@@ -103,6 +104,26 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 - Not supported in the grader side panel (out of scope); criteria submitted without grade are handled as upstream.
 - Known upstream limitation kept as is: in `DISPLAY_EVAL_FROZEN` the points cell is not rendered, so only the
   hidden level travels (the stored grade is kept).
+
+## Notes on academic validation
+
+- A grade (grading item) can be validated **once**, optionally, by a user with
+  `gradingform/rubric_ranges:validate` who is not the grader of the current grade (no self validation).
+- Site administrators are **not** validators by default: the capability is checked without "do anything",
+  so they need a role that grants it explicitly.
+- Flow: the teacher grades; the validator opens the grading form, sees the teacher grade read only and clicks
+  "Validate"; the validator grade and feedback replace the teacher ones and the original teacher grade, level
+  and feedback are kept in `gradingform_rubric_ranges_h` with the validator and the date.
+- A grade is validated when it has history. Then it is read only for everybody: any submission is ignored and
+  the current grade is kept (an empty submission never wipes it).
+- A validator cannot give the first grade: when the teacher has not graded yet, the rubric is read only.
+- Saving without clicking "Validate" keeps the teacher grade.
+- Graders see "Grade validated by…" and the original grade of each criterion; students do not see the validation.
+- The `\gradingform_rubric_ranges\event\grade_validated` event identifies the graded item by `other.itemid`
+  (there is no generic API to get the student from it, so `relateduserid` is not set).
+- JavaScript is required to validate. Validation from the grader side panel is out of scope, but the lock
+  also applies there.
+- With `enablevalidation` disabled the plugin behaves as upstream, even for grades validated before.
 
 ## Upstream fixes included
 

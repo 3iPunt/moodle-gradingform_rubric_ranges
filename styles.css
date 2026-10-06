@@ -336,3 +336,11 @@
     display: inline-block;
     width: 5em;
 }
+
+/* IED extension: academic validation. */
+.gradingform_rubric_ranges .criterion .description .validation {
+    margin-top: 0.5em;
+    font-weight: normal;
+    font-size: 0.9em;
+    color: #6a737b;
+}

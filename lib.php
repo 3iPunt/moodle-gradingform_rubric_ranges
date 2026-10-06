@@ -34,6 +34,7 @@ use core_external\external_multiple_structure;
 use core_external\external_format_value;
 use gradingform_rubric_ranges\local\features;
 use gradingform_rubric_ranges\local\range_resolver;
+use gradingform_rubric_ranges\local\validation_manager;
 use gradingform_rubric_ranges\local\weights;
 
 /** rubric: Used to compare our gradeitem_type against. */
@@ -298,6 +299,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
                         $DB->delete_records('gradingform_rubric_ranges_c', array('id' => $id));
                         $DB->delete_records('gradingform_rubric_ranges_l', array('criterionid' => $id));
                         weights::delete_for_criteria([$id]);
+                        validation_manager::delete_for_criteria([$id]);
                     }
                 }
                 $haschanges[3] = true;
@@ -724,8 +726,9 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
             array('definitionid' => $this->definition->id), '', 'id'));
         // Delete levels.
         $DB->delete_records_list('gradingform_rubric_ranges_l', 'criterionid', $criteria);
-        // IED extension: delete weights.
+        // IED extension: delete weights and validation history.
         weights::delete_for_criteria($criteria);
+        validation_manager::delete_for_criteria($criteria);
         // Delete critera.
         $DB->delete_records_list('gradingform_rubric_ranges_c', 'id', $criteria);
     }
@@ -984,7 +987,12 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
      * @return boolean true if the form data is validated and contains no errors
      */
     public function validate_grading_element($elementvalue) {
+        global $USER;
         $criteria = $this->get_controller()->get_definition()->rubric_criteria;
+        // IED extension: a locked submission (academic validation) is ignored, so it is always valid.
+        if (validation_manager::is_locked(validation_manager::get_state($this, (int) $USER->id), $elementvalue)) {
+            return true;
+        }
         // IED extension: numeric grading validates the grade of each criterion.
         if (features::numericgrading_enabled()) {
             return range_resolver::validate_filling($criteria, $elementvalue);
@@ -1066,6 +1074,36 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
             }
         }
         $this->get_rubric_filling(true);
+    }
+
+    /**
+     * IED extension: applies the academic validation rules before saving the grade.
+     *
+     * Locked submissions are ignored and keep the current grade. A validation stores the validator
+     * filling and the original teacher filling in the validation history in one transaction.
+     *
+     * @param array $elementvalue value of element submitted from the form
+     * @param int $itemid
+     * @return float|int the grade, -1 when there is none
+     */
+    public function submit_and_get_grade($elementvalue, $itemid) {
+        global $DB, $USER;
+
+        $state = validation_manager::get_state($this, (int) $USER->id);
+        if (validation_manager::is_locked($state, $elementvalue) ||
+                ($state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue))) {
+            return validation_manager::keep_current_grade($this);
+        }
+        if ($state !== validation_manager::STATE_PENDING) {
+            return parent::submit_and_get_grade($elementvalue, $itemid);
+        }
+
+        $teacher = validation_manager::get_current_graded_instance($this);
+        $transaction = $DB->start_delegated_transaction();
+        $grade = parent::submit_and_get_grade($elementvalue, $itemid);
+        validation_manager::record_validation($this, $teacher, (int) $USER->id);
+        $transaction->allow_commit();
+        return $grade;
     }
 
     /**
@@ -1201,6 +1239,17 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
         if (!empty($options['showdescriptionteacher'])) {
             $html .= html_writer::tag('div', $this->get_controller()->get_formatted_description(),
                 array('class' => 'gradingform_rubric_ranges-description'));
+        }
+        // IED extension: academic validation states replace the editable rubric.
+        $state = validation_manager::get_state($this, (int) $USER->id);
+        $validatable = $state === validation_manager::STATE_PENDING && !$gradingformelement->_flagFrozen;
+        if ($validatable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
+            if ($state === validation_manager::STATE_PENDING) {
+                $page->requires->js_call_amd('gradingform_rubric_ranges/validation', 'init', [$gradingformelement->getName()]);
+            }
+            $history = validation_manager::get_history((int) $this->get_data('itemid'));
+            return $html . $this->get_controller()->get_renderer($page)->display_validation_element(
+                $state, $criteria, $options, $gradingformelement->getName(), $value, $history);
         }
         $html .= $this->get_controller()->get_renderer($page)->display_rubric(
             $criteria, $options, $mode, $gradingformelement->getName(), $value

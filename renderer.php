@@ -24,6 +24,7 @@
 
 use gradingform_rubric_ranges\local\features;
 use gradingform_rubric_ranges\local\range_resolver;
+use gradingform_rubric_ranges\local\validation_manager;
 use gradingform_rubric_ranges\local\weights;
 
 /**
@@ -169,8 +170,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         }
 
         // Description cell.
-        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description,
-            $descriptiontdparams);
+        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description
+            . $this->validation_template($mode, $value), $descriptiontdparams);
 
         // Levels table.
         $levelsrowparams = array('id' => '{NAME}-criteria-{CRITERION-id}-levels');
@@ -853,6 +854,12 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             $showdescription = $options['showdescriptionstudent'];
         }
         $output = '';
+        // IED extension: graders see the validation of the grade, students do not.
+        if ($cangrade && features::validation_enabled()) {
+            $history = validation_manager::get_history((int) $instance->get_data('itemid'));
+            $output .= $this->validation_badge($history);
+            $values = $this->add_validation_values($values, $criteria, $history);
+        }
         if ($showdescription) {
             $output .= $this->box($instance->get_controller()->get_formatted_description(),
                 'gradingform_rubric_ranges-description');
@@ -1039,5 +1046,140 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             return '';
         }
         return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
+    }
+
+    /**
+     * IED extension: returns the grading element for the locked academic validation states.
+     *
+     * The read only copies use the element name with a "-review" suffix so they do not clash with the
+     * ids used by the upstream YUI module and the editable rubric.
+     *
+     * @param string $state validation_manager::STATE_VALIDATED, STATE_NOT_GRADED or STATE_PENDING
+     * @param array $criteria rubric criteria
+     * @param array $options rubric options
+     * @param string $elementname grading element name
+     * @param array|null $values current filling
+     * @param array $history validation history (criterionid => validation_history)
+     * @return string
+     */
+    public function display_validation_element($state, $criteria, $options, $elementname, $values, $history) {
+        $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
+        switch ($state) {
+            case validation_manager::STATE_VALIDATED:
+                return $this->validation_badge($history) .
+                    $this->display_rubric($criteria, $options, $review, $elementname . '-review',
+                        $this->add_validation_values($values, $criteria, $history));
+
+            case validation_manager::STATE_NOT_GRADED:
+                return $this->output->notification(get_string('validationnotgraded', 'gradingform_rubric_ranges'), 'info') .
+                    $this->display_rubric($criteria, $options, $review, $elementname . '-review');
+
+            case validation_manager::STATE_PENDING:
+                $html = $this->output->notification(get_string('validationpending', 'gradingform_rubric_ranges'), 'info');
+                $html .= html_writer::div(
+                    $this->display_rubric($criteria, $options, $review, $elementname . '-review', $values),
+                    '', ['id' => $elementname . '-validation-review']);
+                $html .= html_writer::tag('button', get_string('validate', 'gradingform_rubric_ranges'), [
+                    'type' => 'button',
+                    'id' => $elementname . '-validate-button',
+                    'class' => 'btn btn-primary mb-3',
+                ]);
+                $html .= html_writer::tag('noscript', get_string('validationnojs', 'gradingform_rubric_ranges'));
+                $editable = html_writer::empty_tag('input', [
+                    'type' => 'hidden',
+                    'name' => $elementname . '[validate]',
+                    'id' => $elementname . '-validate',
+                    'value' => 0,
+                ]);
+                $editable .= $this->display_rubric($criteria, $options, gradingform_rubric_ranges_controller::DISPLAY_EVAL,
+                    $elementname, $values);
+                $html .= html_writer::div($editable, '', ['id' => $elementname . '-validation-editable', 'hidden' => 'hidden']);
+                return $html;
+
+            default:
+                return '';
+        }
+    }
+
+    /**
+     * IED extension: returns the badge telling who validated the grade and when.
+     *
+     * @param array $history validation history (criterionid => validation_history)
+     * @return string
+     */
+    protected function validation_badge($history) {
+        if (empty($history)) {
+            return '';
+        }
+        $record = reset($history);
+        $a = (object) [
+            'validator' => $this->user_fullname($record->get('validatorid')),
+            'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
+        ];
+        return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
+    }
+
+    /**
+     * IED extension: adds the original teacher grade of each criterion to the values to display.
+     *
+     * @param array|null $values current filling
+     * @param array $criteria rubric criteria
+     * @param array $history validation history (criterionid => validation_history)
+     * @return array|null
+     */
+    protected function add_validation_values($values, $criteria, $history) {
+        foreach ($history as $criterionid => $record) {
+            if (!isset($criteria[$criterionid])) {
+                continue;
+            }
+            $levelid = $record->get('teacherlevelid');
+            $level = $levelid ? ($criteria[$criterionid]['levels'][$levelid] ?? null) : null;
+            $grade = $record->get('teachergrade');
+            if ($grade === null && $level) {
+                $grade = $level['score'];
+            }
+            $values['criteria'][$criterionid]['validation'] = [
+                'grade' => $grade === null ? '-' : (0 + $grade),
+                'level' => $level ? $level['definition'] : '-',
+                'teacher' => $this->user_fullname($record->get('teacherid')),
+                'remark' => (string) $record->get('teacherremark'),
+            ];
+        }
+        return $values;
+    }
+
+    /**
+     * IED extension: returns the original teacher grade of a validated criterion (graders only).
+     *
+     * @param int $mode rubric display mode
+     * @param mixed $value criterion value, with 'validation' when the grade is validated
+     * @return string
+     */
+    protected function validation_template($mode, $value) {
+        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_REVIEW || !is_array($value)
+                || empty($value['validation'])) {
+            return '';
+        }
+        $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
+            'grade' => $value['validation']['grade'],
+            'level' => s($value['validation']['level']),
+            'teacher' => s($value['validation']['teacher']),
+        ]), 'validationoriginal');
+        if ($value['validation']['remark'] !== '') {
+            $html .= html_writer::div(get_string('validationoriginalremark', 'gradingform_rubric_ranges',
+                s($value['validation']['remark'])), 'validationoriginalremark');
+        }
+        return html_writer::div($html, 'validation');
+    }
+
+    /**
+     * IED extension: full name of a user, or a placeholder when the user does not exist any more.
+     *
+     * @param int|null $userid
+     * @return string
+     */
+    protected function user_fullname($userid) {
+        $user = $userid ? \core_user::get_user($userid) : false;
+        return $user ? fullname($user) : get_string('unknownuser');
     }
 }
