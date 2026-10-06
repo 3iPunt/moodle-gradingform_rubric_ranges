@@ -30,6 +30,7 @@ One commit per task, applied in order:
 | `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
 | `0004-T3-…` | Academic validation with history and `grade_validated` event |
 | `0005-T4-…` | Weighted final grade |
+| `0006-T5-…` | Backup and restore of weights and validation history |
 
 Further patches are added as each task is delivered.
 
@@ -142,6 +143,19 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 - JavaScript is required to validate. Validation from the grader side panel is out of scope, but the lock
   also applies there.
 - With `enablevalidation` disabled the plugin behaves as upstream, even for grades validated before.
+
+## Notes on backup and restore
+
+- Weights hang from each criterion (`rubric_ranges_weight`): they are copied with or without user data.
+- The validation history hangs from each grading instance (`rubric_ranges_validations`): like the grades, it is
+  only copied with user data. Teacher and validator are annotated as users of the backup. The persistent
+  technical fields are regenerated on restore; `timevalidated` is kept.
+- On restore, instance, criterion, levels, graded item and users are remapped. A row whose criterion or graded
+  item cannot be mapped is skipped. When the teacher or the validator cannot be mapped the row is kept with an
+  empty user, so the grade stays validated and locked.
+- Backups made before the fork restore with weight 1 and no validation. Backups made with the fork restore as
+  upstream in a site with the upstream plugin (unknown elements are ignored). Duplicate and import (no user
+  data) copy the weights but not the history.
 
 ## Upstream fixes included
 

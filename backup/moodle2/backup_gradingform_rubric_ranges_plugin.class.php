@@ -71,6 +71,11 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin 
         $level->set_source_table('gradingform_rubric_ranges_l',
                 array('criterionid' => backup::VAR_PARENTID));
 
+        // IED extension: weight of each criterion (part of the rubric design, copied with or without user data).
+        $weight = new backup_nested_element('rubric_ranges_weight', array('id'), array('weight'));
+        $criterion->add_child($weight);
+        $weight->set_source_table('gradingform_rubric_ranges_w', array('criterionid' => backup::VAR_PARENTID));
+
         // No need to annotate ids or files yet (one day when criterion definition supports
         // Embedded files, they must be annotated here).
 
@@ -112,6 +117,18 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin 
                 JOIN {gradingform_rubric_ranges_c} rc ON rc.id = rf.criterionid AND gi.definitionid = rc.definitionid
                 WHERE rf.instanceid = :instanceid',
                 array('instanceid' => backup::VAR_PARENTID));
+
+        // IED extension: validation history (instances are only backed up with user data).
+        // The persistent technical fields (usermodified, timecreated, timemodified) are regenerated on restore.
+        $validations = new backup_nested_element('rubric_ranges_validations');
+        $validation = new backup_nested_element('rubric_ranges_validation', array('id'), array(
+            'itemid', 'criterionid', 'teacherlevelid', 'teachergrade', 'teacherremark', 'teacherremarkformat',
+            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated'));
+        $pluginwrapper->add_child($validations);
+        $validations->add_child($validation);
+        $validation->set_source_table('gradingform_rubric_ranges_h', array('instanceid' => backup::VAR_PARENTID));
+        $validation->annotate_ids('user', 'teacherid');
+        $validation->annotate_ids('user', 'validatorid');
 
         // No need to annotate ids or files yet (one day when remark field supports.
         // Embedded fileds, they must be annotated here).
