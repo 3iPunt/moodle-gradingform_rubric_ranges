@@ -31,6 +31,7 @@ One commit per task, applied in order:
 | `0004-T3-…` | Academic validation with history and `grade_validated` event |
 | `0005-T4-…` | Weighted final grade |
 | `0006-T5-…` | Backup and restore of weights and validation history |
+| `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
 
 Further patches are added as each task is delivered.
 
@@ -156,6 +157,23 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 - Backups made before the fork restore with weight 1 and no validation. Backups made with the fork restore as
   upstream in a site with the upstream plugin (unknown elements are ignored). Duplicate and import (no user
   data) copy the weights but not the history.
+
+## Notes on privacy
+
+- Graded user (called by `core_grading` through `gradingform_provider_v2`): the export includes the numeric
+  grade of each criterion, criteria without level, and the validation history (original and validated grade,
+  level and feedback, and the date) **without** the identity of the teacher or the validator. Deleting the
+  user's data deletes the fillings and the validation history of the instances.
+- Teacher and validator: the plugin is also a `plugin\provider` and `core_userlist_provider` on its own (no
+  precedent in core for combining it with `gradingform_provider_v2`, but the privacy manager allows it and the
+  component is reported compliant). Their export lists the validations they did or that affected their grades
+  (role, item, criterion, grades, date and only the feedback they wrote). On deletion they are **anonymised**
+  (`validatorid` 0, `teacherid` null): the rows are kept so the grade stays validated.
+- `gradingform_rubric_ranges_w.usermodified` is declared and treated like core treats the grading
+  definitions (not exported apart nor deleted).
+- Upstream fix: the export used a `JOIN` on levels, so criteria without level were lost.
+- Known upstream limitation kept as is: the export is keyed by the criterion description, so criteria with the
+  same description are merged. Changing the key would change the export contract (and the upstream test).
 
 ## Upstream fixes included
 

@@ -235,17 +235,129 @@ final class validation_manager {
      * @param int[] $criterionids
      */
     public static function delete_for_criteria(array $criterionids): void {
-        global $DB;
-
-        $criterionids = array_filter(array_map('intval', $criterionids));
-        if (empty($criterionids)) {
-            return;
-        }
-        // Only builds the SQL fragment, the query is run by the persistent.
-        [$insql, $params] = $DB->get_in_or_equal($criterionids, SQL_PARAMS_NAMED);
-        foreach (validation_history::get_records_select("criterionid $insql", $params) as $record) {
+        foreach (self::get_records_in('criterionid', $criterionids) as $record) {
             $record->delete();
         }
+    }
+
+    /**
+     * Returns the validation history stored in a grading instance.
+     *
+     * @param int $instanceid
+     * @return validation_history[]
+     */
+    public static function get_history_for_instance(int $instanceid): array {
+        return validation_history::get_records(['instanceid' => $instanceid], 'criterionid');
+    }
+
+    /**
+     * Deletes the validation history stored in the given grading instances.
+     *
+     * @param int[] $instanceids
+     */
+    public static function delete_for_instances(array $instanceids): void {
+        foreach (self::get_records_in('instanceid', $instanceids) as $record) {
+            $record->delete();
+        }
+    }
+
+    /**
+     * Returns the validation history of the given criteria where the user is the teacher or the validator.
+     *
+     * @param int $userid
+     * @param int[] $criterionids
+     * @return validation_history[]
+     */
+    public static function get_history_for_user(int $userid, array $criterionids): array {
+        return array_filter(self::get_records_in('criterionid', $criterionids), function($record) use ($userid) {
+            return (int) $record->get('teacherid') === $userid || (int) $record->get('validatorid') === $userid;
+        });
+    }
+
+    /**
+     * Anonymises a user in the validation history of the given criteria (privacy deletion request).
+     *
+     * The rows are kept, so the grades stay validated and the original student grade is preserved.
+     *
+     * @param int $userid
+     * @param int[] $criterionids
+     */
+    public static function anonymise_user(int $userid, array $criterionids): void {
+        foreach (self::get_history_for_user($userid, $criterionids) as $record) {
+            self::anonymise($record, $userid);
+        }
+    }
+
+    /**
+     * Anonymises every user in the validation history of the given criteria.
+     *
+     * @param int[] $criterionids
+     */
+    public static function anonymise_all(array $criterionids): void {
+        foreach (self::get_records_in('criterionid', $criterionids) as $record) {
+            self::anonymise($record, null);
+        }
+    }
+
+    /**
+     * Returns the criteria of the ranged rubrics defined in the given contexts.
+     *
+     * Direct query on upstream and core tables: there is no persistent for them, and the grading manager API
+     * (get_controller) creates grading areas as a side effect and needs the course module to exist, which is not
+     * the case when a context is being deleted.
+     *
+     * @param int[] $contextids
+     * @return array criterionid => description
+     */
+    public static function criteria_in_contexts(array $contextids): array {
+        global $DB;
+
+        $contextids = array_filter(array_map('intval', $contextids));
+        if (empty($contextids)) {
+            return [];
+        }
+        [$insql, $params] = $DB->get_in_or_equal($contextids, SQL_PARAMS_NAMED);
+        $params['method'] = 'rubric_ranges';
+        return $DB->get_records_sql_menu("SELECT c.id, c.description
+                                            FROM {gradingform_rubric_ranges_c} c
+                                            JOIN {grading_definitions} d ON d.id = c.definitionid AND d.method = :method
+                                            JOIN {grading_areas} a ON a.id = d.areaid
+                                           WHERE a.contextid $insql", $params);
+    }
+
+    /**
+     * Removes the user (or every user when null) from a history row.
+     *
+     * @param validation_history $record
+     * @param int|null $userid
+     */
+    private static function anonymise(validation_history $record, ?int $userid): void {
+        if ($userid === null || (int) $record->get('teacherid') === $userid) {
+            $record->set('teacherid', null);
+        }
+        if ($userid === null || (int) $record->get('validatorid') === $userid) {
+            $record->set('validatorid', 0);
+        }
+        $record->update();
+    }
+
+    /**
+     * Returns the history records whose field is in the given list of ids.
+     *
+     * @param string $field
+     * @param int[] $ids
+     * @return validation_history[]
+     */
+    private static function get_records_in(string $field, array $ids): array {
+        global $DB;
+
+        $ids = array_filter(array_map('intval', $ids));
+        if (empty($ids)) {
+            return [];
+        }
+        // Only builds the SQL fragment, the query is run by the persistent.
+        [$insql, $params] = $DB->get_in_or_equal($ids, SQL_PARAMS_NAMED);
+        return validation_history::get_records_select("$field $insql", $params);
     }
 
     /**
