@@ -21,6 +21,17 @@
  * @copyright  2011 Marina Glancy
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
+
+use gradingform_rubric_ranges\local\features;
+use gradingform_rubric_ranges\local\weights;
+
+/**
+ * Renderer used for displaying rubric
+ *
+ * @package    gradingform_rubric_ranges
+ * @copyright  2011 Marina Glancy
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
 
     /**
@@ -157,7 +168,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         }
 
         // Description cell.
-        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate.$description, $descriptiontdparams);
+        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description,
+            $descriptiontdparams);
 
         // Levels table.
         $levelsrowparams = array('id' => '{NAME}-criteria-{CRITERION-id}-levels');
@@ -715,9 +727,12 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
     public function display_rubric($criteria, $options, $mode, $elementname = null, $values = null) {
         $criteriastr = '';
         $cnt = 0;
+        // IED extension: weight percentages.
+        $weightpercentages = features::weighting_enabled() ? weights::percentages($criteria) : [];
         foreach ($criteria as $id => $criterion) {
             $criterion['class'] = $this->get_css_class_suffix($cnt++, count($criteria) - 1);
             $criterion['id'] = $id;
+            $criterion['weightpercent'] = $weightpercentages[$id] ?? null;
 
             $levelsstr = '';
             $levelcnt = 0;
@@ -869,5 +884,60 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         $html .= $this->output->notification(get_string('rubricmappingexplained',
             'gradingform_rubric_ranges', (object)$scores), 'info');
         return $html;
+    }
+
+    /**
+     * IED extension: returns the html displaying the weight of a criterion.
+     *
+     * Expressions {NAME} and {CRITERION-id} are replaced by criterion_template().
+     * The weight is only shown to people who can grade or manage the rubric.
+     *
+     * @param int $mode rubric display mode
+     * @param array $criterion criterion data, optionally with 'weight' and 'weightpercent'
+     * @return string
+     */
+    protected function weight_template($mode, $criterion) {
+        if (!features::weighting_enabled()) {
+            return '';
+        }
+        $weight = weights::clamp($criterion['weight'] ?? weights::DEFAULT);
+        $percent = isset($criterion['weightpercent']) ? format_float($criterion['weightpercent'], 1, true, true) : '';
+        $summary = get_string('weightsummary', 'gradingform_rubric_ranges', (object) [
+            'weight' => $weight,
+            'percent' => $percent,
+        ]);
+
+        switch ($mode) {
+            case gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL:
+                $options = array_combine(range(weights::MIN, weights::MAX), range(weights::MIN, weights::MAX));
+                $select = html_writer::select($options, '{NAME}[criteria][{CRITERION-id}][weight]', $weight, false, [
+                    'id' => '{NAME}-criteria-{CRITERION-id}-weight',
+                    'class' => 'custom-select weightselect',
+                ]);
+                $html = html_writer::label(get_string('weight', 'gradingform_rubric_ranges'),
+                    '{NAME}-criteria-{CRITERION-id}-weight');
+                $html .= $select;
+                $html .= html_writer::span($percent === '' ? '' :
+                    get_string('weightpercent', 'gradingform_rubric_ranges', $percent), 'weightpercent');
+                return html_writer::div($html, 'weight');
+
+            case gradingform_rubric_ranges_controller::DISPLAY_EDIT_FROZEN:
+                $hidden = html_writer::empty_tag('input', [
+                    'type' => 'hidden',
+                    'name' => '{NAME}[criteria][{CRITERION-id}][weight]',
+                    'value' => $weight,
+                ]);
+                return $hidden . html_writer::div($summary, 'weight');
+
+            case gradingform_rubric_ranges_controller::DISPLAY_PREVIEW:
+            case gradingform_rubric_ranges_controller::DISPLAY_EVAL:
+            case gradingform_rubric_ranges_controller::DISPLAY_EVAL_FROZEN:
+            case gradingform_rubric_ranges_controller::DISPLAY_REVIEW:
+                return html_writer::div($summary, 'weight');
+
+            default:
+                // Students (DISPLAY_VIEW, DISPLAY_PREVIEW_GRADED) and print do not see weights.
+                return '';
+        }
     }
 }

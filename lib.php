@@ -32,6 +32,7 @@ use core_external\external_value;
 use core_external\external_single_structure;
 use core_external\external_multiple_structure;
 use core_external\external_format_value;
+use gradingform_rubric_ranges\local\weights;
 
 /** rubric: Used to compare our gradeitem_type against. */
 const RUBRIC_RANGES = 'rubric_ranges';
@@ -116,7 +117,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
      */
     public function update_definition(stdClass $newdefinition, $usermodified = null) {
         $this->update_or_check_rubric($newdefinition, $usermodified, true);
-        if (isset($newdefinition->rubric['regrade']) && $newdefinition->rubric['regrade']) {
+        if (isset($newdefinition->rubricranges['regrade']) && $newdefinition->rubricranges['regrade']) {
             $this->mark_for_regrade();
         }
     }
@@ -198,6 +199,10 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
 
                 if ($doupdate) {
                     $id = $DB->insert_record('gradingform_rubric_ranges_c', $data);
+                    // IED extension: weight is only saved when submitted (weighting enabled).
+                    if (array_key_exists('weight', $criterion)) {
+                        weights::save($id, $criterion['weight']);
+                    }
                 }
                 $haschanges[5] = true;
             } else {
@@ -215,6 +220,14 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
                         $DB->update_record('gradingform_rubric_ranges_c', $data);
                     }
                     $haschanges[1] = true;
+                }
+                // IED extension: a weight change affects the grade, students require re-grading.
+                if (array_key_exists('weight', $criterion)
+                        && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight']) {
+                    if ($doupdate) {
+                        weights::save($id, $criterion['weight']);
+                    }
+                    $haschanges[3] = true;
                 }
                 // Remove deleted levels from DB and calculate the maximum score for this criteria.
                 foreach ($currentcriteria[$id]['levels'] as $levelid => $currentlevel) {
@@ -282,6 +295,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
                     if ($id > 0) {
                         $DB->delete_records('gradingform_rubric_ranges_c', array('id' => $id));
                         $DB->delete_records('gradingform_rubric_ranges_l', array('criterionid' => $id));
+                        weights::delete_for_criteria([$id]);
                     }
                 }
                 $haschanges[3] = true;
@@ -380,6 +394,13 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
         }
 
         $rs->close();
+        // IED extension: criteria weights (always loaded so copy, backup and grading see the real value).
+        if ($this->definition && !empty($this->definition->rubric_criteria)) {
+            $criteriaweights = weights::load(array_keys($this->definition->rubric_criteria));
+            foreach ($criteriaweights as $rcid => $weight) {
+                $this->definition->rubric_criteria[$rcid]['weight'] = $weight;
+            }
+        }
         $options = $this->get_options();
         if (!$options['sortlevelsasc']) {
             if ($this->definition) {
@@ -701,6 +722,8 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
             array('definitionid' => $this->definition->id), '', 'id'));
         // Delete levels.
         $DB->delete_records_list('gradingform_rubric_ranges_l', 'criterionid', $criteria);
+        // IED extension: delete weights.
+        weights::delete_for_criteria($criteria);
         // Delete critera.
         $DB->delete_records_list('gradingform_rubric_ranges_c', 'id', $criteria);
     }

@@ -26,6 +26,7 @@ One commit per task, applied in order:
 | Patch | Content |
 |---|---|
 | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
+| `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
 
 Further patches are added as each task is delivered.
 
@@ -78,6 +79,25 @@ Core does not load `settings.php` for `gradingform` plugins, so the feature flag
 - `config.php`: `$CFG->forced_plugin_settings['gradingform_rubric_ranges']['enableweighting'] = 1;`
 
 Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes made in the page are recorded in the config changes report.
+
+## Notes on criteria weighting
+
+- Criteria without a stored weight weigh 1, so existing rubrics need no migration.
+- Weights are only saved when they are submitted: disabling the feature keeps the configured weights.
+- Changing a weight in a rubric already used for grading requires regrading.
+- Enabling or disabling the feature does **not** recalculate grades already sent to the gradebook; it only
+  applies to grades saved afterwards.
+- Weights are only shown to graders and rubric managers, never to students.
+
+## Upstream fixes included
+
+- `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+  marked for regrade. Same field name fix in `edit.php` for the `lockzeropoints` warning.
+
+## Data access
+
+Tables added by the fork are accessed only through `\core\persistent` classes (`classes/persistent`);
+business rules live in `classes/local`.
 
 ## Capability
 

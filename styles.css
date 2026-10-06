@@ -310,3 +310,23 @@
 .path-mod-assign [data-region="grade-panel"] .fitem.popout .gradingform_rubric_ranges .remark textarea {
     width: 200px;
 }
+
+/* IED extension: criteria weighting. */
+.gradingform_rubric_ranges .criterion .description .weight {
+    margin: 0.25em 0;
+    font-weight: normal;
+    font-size: 0.9em;
+}
+
+.gradingform_rubric_ranges .criterion .description .weight label {
+    margin: 0 0.5em 0 0;
+}
+
+.gradingform_rubric_ranges .criterion .description .weight .weightselect {
+    width: auto;
+}
+
+.gradingform_rubric_ranges .criterion .description .weight .weightpercent {
+    margin-left: 0.5em;
+    color: #575;
+}

@@ -123,6 +123,10 @@ class MoodleQuickForm_rubricrangeseditor extends HTML_QuickForm_input {
                     'leveltemplate' => $renderer->level_template($mode, $data['options'], $this->getName())
                    )),
                 true, $module);
+            // IED extension: live weight percentages.
+            if (\gradingform_rubric_ranges\local\features::weighting_enabled()) {
+                $PAGE->requires->js_call_amd('gradingform_rubric_ranges/weights_editor', 'init', [$this->getName()]);
+            }
         } else {
             // Rubric is frozen, no javascript needed.
             if ($this->_persistantFreeze) {
@@ -329,6 +333,11 @@ class MoodleQuickForm_rubricrangeseditor extends HTML_QuickForm_input {
             $return['criteria'][$id]['isranged'] = (isset($return['criteria'][$id]['isranged'])
                 && ($return['criteria'][$id]['isranged'] == 1))
                 ? 1 : 0;
+            // IED extension: normalise the weight only when submitted, never add a default one.
+            if (array_key_exists('weight', $return['criteria'][$id])) {
+                $return['criteria'][$id]['weight'] = \gradingform_rubric_ranges\local\weights::clamp(
+                    $return['criteria'][$id]['weight']);
+            }
         }
 
         // Create validation error string (if needed).

@@ -120,3 +120,6 @@ $string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
 $string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
 $string['settingspage'] = 'Ranged rubric settings';
 $string['settingssaved'] = 'Changes saved';
+$string['weight'] = 'Weight';
+$string['weightpercent'] = '{$a} %';
+$string['weightsummary'] = 'Weight {$a->weight} · {$a->percent} %';
