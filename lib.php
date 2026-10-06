@@ -32,6 +32,8 @@ use core_external\external_value;
 use core_external\external_single_structure;
 use core_external\external_multiple_structure;
 use core_external\external_format_value;
+use gradingform_rubric_ranges\local\features;
+use gradingform_rubric_ranges\local\range_resolver;
 use gradingform_rubric_ranges\local\weights;
 
 /** rubric: Used to compare our gradeitem_type against. */
@@ -953,6 +955,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
                     || !empty($elementvalue['criteria'][$id]['remark'])) {
                 return false;
             }
+            // IED extension: a numeric grade is data too.
+            if (features::numericgrading_enabled()
+                    && trim((string) ($elementvalue['criteria'][$id]['grade'] ?? '')) !== '') {
+                return false;
+            }
         }
         return true;
     }
@@ -978,6 +985,10 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
      */
     public function validate_grading_element($elementvalue) {
         $criteria = $this->get_controller()->get_definition()->rubric_criteria;
+        // IED extension: numeric grading validates the grade of each criterion.
+        if (features::numericgrading_enabled()) {
+            return range_resolver::validate_filling($criteria, $elementvalue);
+        }
         if (!isset($elementvalue['criteria'])
             || !is_array($elementvalue['criteria'])
             || count($elementvalue['criteria']) < count($criteria)) {
@@ -1019,6 +1030,10 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
      */
     public function update($data) {
         global $DB;
+        // IED extension: with numeric grading the server decides the level from the grade.
+        if (features::numericgrading_enabled()) {
+            $data = range_resolver::normalise_filling($this->get_controller()->get_definition()->rubric_criteria, $data);
+        }
         $currentgrade = $this->get_rubric_filling();
         parent::update($data);
         foreach ($data['criteria'] as $criterionid => $record) {
@@ -1061,7 +1076,13 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
     public function get_grade() {
         $grade = $this->get_rubric_filling();
 
-        if (!($scores = $this->get_controller()->get_min_max_score()) || $scores['maxscore'] <= $scores['minscore']) {
+        // IED extension: with numeric grading every criterion goes from 0 to its maximum.
+        $numeric = features::numericgrading_enabled();
+        $scores = $this->get_controller()->get_min_max_score();
+        if ($scores && $numeric) {
+            $scores = range_resolver::min_max_score($this->get_controller()->get_definition()->rubric_criteria);
+        }
+        if (!$scores || $scores['maxscore'] <= $scores['minscore']) {
             return -1;
         }
 
@@ -1075,6 +1096,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
 
         $curscore = 0;
         foreach ($grade['criteria'] as $id => $record) {
+            if ($numeric) {
+                $curscore += range_resolver::effective_grade(
+                    $this->get_controller()->get_definition()->rubric_criteria[$id], $record) ?? 0;
+                continue;
+            }
             $curscore += ($this->get_controller()->get_definition()->rubric_criteria[$id]['isranged'])
                         ? $record['grade']
                         : $this->get_controller()->get_definition()->rubric_criteria[$id]['levels'][$record['levelid']]['score'];
@@ -1124,6 +1150,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
                 true,
                 $module
             );
+            // IED extension: numeric grade, automatic level and feedback.
+            if (features::numericgrading_enabled()) {
+                $page->requires->js_call_amd('gradingform_rubric_ranges/numeric_grading', 'init',
+                    [$gradingformelement->getName()]);
+            }
             $mode = gradingform_rubric_ranges_controller::DISPLAY_EVAL;
         } else {
             if ($gradingformelement->_persistantFreeze) {

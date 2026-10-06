@@ -23,6 +23,7 @@
  */
 
 use gradingform_rubric_ranges\local\features;
+use gradingform_rubric_ranges\local\range_resolver;
 use gradingform_rubric_ranges\local\weights;
 
 /**
@@ -259,7 +260,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             }
         }
 
-        $displaygradeinput = !$options['enableremarks'] && $mode != gradingform_rubric_ranges_controller::DISPLAY_VIEW;
+        $displaygradeinput = !$options['enableremarks'] && $mode != gradingform_rubric_ranges_controller::DISPLAY_VIEW
+            && !features::numericgrading_enabled(); // IED extension: replaced by numeric_grade_template().
         if ($displaygradeinput) {
             if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
                 if ($criterion['isranged']) {
@@ -281,10 +283,15 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             }
         }
 
+        // IED extension: numeric grade for every criterion.
+        $numeric = features::numericgrading_enabled();
+        if ($numeric) {
+            $gradetemplate = $this->numeric_grade_template($mode, $criterion);
+        }
         $pointstemplate = $gradetemplate;
         $pointstemplate .= html_writer::start_tag('div',
             array('class' => 'inline', 'id' => '{NAME}-criteria-{CRITERION-id}-points'));
-        if ($criterion['isranged']) {
+        if ($criterion['isranged'] || $numeric) {
             if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
                 $pointstemplate .= ' / ';
                 $pointstemplate .= isset($criterion['points']) ? $criterion['points'] : 0;
@@ -304,7 +311,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             $criteriontemplate .= html_writer::tag('td', $pointstemplate, array('class' => 'addlevel'));
         }
         if ($mode == gradingform_rubric_ranges_controller::DISPLAY_VIEW
-            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
+            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL
+            || ($numeric && $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW)) {
             $criteriontemplate .= html_writer::tag('td', $pointstemplate, array('class' => 'points'));
         }
         $criteriontemplate .= html_writer::end_tag('tr'); // Criterion.
@@ -364,6 +372,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         if (isset($level['tdwidth'])) {
             $tdattributes['width'] = round($level['tdwidth']).'%';
         }
+        $tdattributes += $this->level_data_attributes($level); // IED extension.
 
         $leveltemplate = html_writer::start_tag('div', array('class' => 'level-wrapper'));
         if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL) {
@@ -568,6 +577,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             $input = html_writer::empty_tag('input', $criteriainputparams);
             $rubrictemplate .= html_writer::tag('div', $input, array('class' => 'addcriterion btn btn-secondary'));
         }
+        $rubrictemplate .= $this->numeric_remarks_warning($mode, $options); // IED extension.
         $rubrictemplate .= $this->rubric_edit_options($mode, $options);
         $rubrictemplate .= html_writer::end_tag('div');
 
@@ -743,8 +753,17 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             }
             $index = 1;
 
+            // IED extension: numeric grading (ranges computed before scores are turned into "x to y" labels).
+            $numeric = features::numericgrading_enabled();
+            $levelranges = [];
+            if ($numeric) {
+                $levelranges = range_resolver::ranges_for_criterion($criterion);
+                $criterion['numericgrade'] = range_resolver::display_grade($criterion, $criterionvalue);
+                $criterion['points'] = range_resolver::max_grade($criterion);
+            }
+
             $criterion['levels'] = $this->display_range_score($mode,
-                $criterion['levels'], $options['sortlevelsasc'], $criterion['isranged']);
+                $criterion['levels'], $options['sortlevelsasc'], $criterion['isranged'] || $numeric);
             foreach ($criterion['levels'] as $levelid => $level) {
                 $level['id'] = $levelid;
                 $level['class'] = $this->get_css_class_suffix($levelcnt++, count($criterion['levels']) - 1);
@@ -761,6 +780,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                 }
                 $level['tdwidth'] = 100 / count($criterion['levels']);
                 $level['index'] = $index;
+                $level['range'] = $levelranges[$levelid] ?? null;
                 $levelsstr .= $this->level_template($mode, $options, $elementname, $id, $level);
                 $index++;
             }
@@ -939,5 +959,85 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                 // Students (DISPLAY_VIEW, DISPLAY_PREVIEW_GRADED) and print do not see weights.
                 return '';
         }
+    }
+
+    /**
+     * IED extension: data attributes of a level cell used by the numeric grading JS.
+     *
+     * They replace parsing the "x to y" label, which breaks when the string is translated.
+     *
+     * @param array $level level data, with 'range' when numeric grading is enabled
+     * @return array
+     */
+    protected function level_data_attributes($level) {
+        if (empty($level['range'])) {
+            return [];
+        }
+        return [
+            'data-rangemin' => $level['range']['min'],
+            'data-rangemax' => (string) (0 + $level['range']['max']),
+            'data-definition' => (string) $level['definition'],
+        ];
+    }
+
+    /**
+     * IED extension: returns the html of the numeric grade of a criterion.
+     *
+     * Expressions {NAME} and {CRITERION-id} are replaced by criterion_template().
+     *
+     * @param int $mode rubric display mode
+     * @param array $criterion criterion data with 'numericgrade' and 'points'
+     * @return string
+     */
+    protected function numeric_grade_template($mode, $criterion) {
+        $grade = $criterion['numericgrade'] ?? '';
+        switch ($mode) {
+            case gradingform_rubric_ranges_controller::DISPLAY_EVAL:
+                return html_writer::empty_tag('input', [
+                    'type' => 'number',
+                    'name' => '{NAME}[criteria][{CRITERION-id}][grade]',
+                    'id' => '{NAME}-criteria-{CRITERION-id}-grade',
+                    'class' => 'form-control gradeinput',
+                    'min' => 0,
+                    'max' => (string) (0 + ($criterion['points'] ?? 0)),
+                    'step' => 1,
+                    'value' => $grade,
+                    'aria-label' => get_string('gradeinput', 'gradingform_rubric_ranges', s($criterion['description'])),
+                ]);
+
+            case gradingform_rubric_ranges_controller::DISPLAY_EVAL_FROZEN:
+                return html_writer::empty_tag('input', [
+                    'type' => 'hidden',
+                    'name' => '{NAME}[criteria][{CRITERION-id}][grade]',
+                    'value' => $grade,
+                ]);
+
+            case gradingform_rubric_ranges_controller::DISPLAY_REVIEW:
+            case gradingform_rubric_ranges_controller::DISPLAY_VIEW:
+                if ($grade === '') {
+                    return '';
+                }
+                return html_writer::div($grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'), 'inline',
+                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']);
+
+            default:
+                return '';
+        }
+    }
+
+    /**
+     * IED extension: warning in the rubric editor when numeric grading is enabled but remarks are not,
+     * because the automatic feedback is written in the criterion remark.
+     *
+     * @param int $mode rubric display mode
+     * @param array $options rubric options
+     * @return string
+     */
+    protected function numeric_remarks_warning($mode, $options) {
+        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL
+                || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
+            return '';
+        }
+        return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
     }
 }

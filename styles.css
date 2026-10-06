@@ -330,3 +330,9 @@
     margin-left: 0.5em;
     color: #575;
 }
+
+/* IED extension: numeric grading. */
+.gradingform_rubric_ranges .criterion .points .gradeinput {
+    display: inline-block;
+    width: 5em;
+}

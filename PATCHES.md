@@ -27,6 +27,7 @@ One commit per task, applied in order:
 |---|---|
 | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
 | `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
+| `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
 
 Further patches are added as each task is delivered.
 
@@ -89,10 +90,26 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
   applies to grades saved afterwards.
 - Weights are only shown to graders and rubric managers, never to students.
 
+## Notes on numeric grading
+
+- Every criterion gets an integer grade from 0 to its maximum. Ranges are the upstream ones: the lowest
+  level goes from 0 to its score and every other level from the previous score + 1 to its own score.
+- The server always decides the level from the grade (the JS only gives instant feedback).
+- The definition of the level is proposed as the criterion remark; a remark edited by the grader is never
+  overwritten. This needs "Allow grader to add text remarks for each criterion": the rubric editor warns
+  when it is disabled.
+- With numeric grading the minimum score of each criterion is 0 for the grade calculation.
+- Fillings saved before enabling it keep their level score when the stored grade does not match the level.
+- Not supported in the grader side panel (out of scope); criteria submitted without grade are handled as upstream.
+- Known upstream limitation kept as is: in `DISPLAY_EVAL_FROZEN` the points cell is not rendered, so only the
+  hidden level travels (the stored grade is kept).
+
 ## Upstream fixes included
 
 - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
   marked for regrade. Same field name fix in `edit.php` for the `lockzeropoints` warning.
+- With numeric grading enabled, the PHP warning for the undefined `$currentgrade` in `criterion_template()`
+  (remarks disabled, `DISPLAY_EVAL_FROZEN`) no longer happens.
 
 ## Data access
 
