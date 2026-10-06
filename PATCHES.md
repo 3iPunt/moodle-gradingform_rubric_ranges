@@ -32,6 +32,7 @@ One commit per task, applied in order:
 | `0005-T4-…` | Weighted final grade |
 | `0006-T5-…` | Backup and restore of weights and validation history |
 | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
+| `0008-T7-…` | PHPUnit tests of the IED extension |
 
 Further patches are added as each task is delivered.
 
@@ -174,6 +175,32 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 - Upstream fix: the export used a `JOIN` on levels, so criteria without level were lost.
 - Known upstream limitation kept as is: the export is keyed by the criterion description, so criteria with the
   same description are merged. Changing the key would change the export contract (and the upstream test).
+
+## Tests
+
+Set up PHPUnit once (`config.php` needs `$CFG->phpunit_prefix` and `$CFG->phpunit_dataroot`):
+
+```bash
+composer install
+php admin/tool/phpunit/cli/init.php
+```
+
+Run the plugin suite:
+
+```bash
+vendor/bin/phpunit --testsuite gradingform_rubric_ranges_testsuite
+```
+
+- The IED tests (`tests/local`, `tests/event`, `tests/privacy/provider_ied_test.php`, `tests/*_test.php` and the shared
+  `tests/ied_test_helper.php`) cover weights, ranges, final grade, validation and its event, rendering, backup and
+  restore, privacy, and the upstream behaviour with every feature disabled. The upstream generator and tests are not
+  modified.
+- **Known upstream issue, not fixed:** the grader side panel tests (`tests/grades/grader/gradingpanel/external`,
+  12 tests) error on Moodle 4.5 because they include `lib/externallib.php`, which since MDL-76583 requires the
+  `@runInSeparateProcess` annotation in the test itself (`--process-isolation` is not enough). They are upstream
+  tests of a feature out of the scope of the fork and are unchanged since `2aece39`.
+- The byte to byte comparison of the rendered HTML with upstream needs both code bases, so it is not part of the
+  suite: render every display mode with fixed data and all features disabled on the fork and on `2aece39`, and diff.
 
 ## Upstream fixes included
 
