@@ -29,6 +29,7 @@ One commit per task, applied in order:
 | `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
 | `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
 | `0004-T3-…` | Academic validation with history and `grade_validated` event |
+| `0005-T4-…` | Weighted final grade |
 
 Further patches are added as each task is delivered.
 
@@ -90,6 +91,23 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 - Enabling or disabling the feature does **not** recalculate grades already sent to the gradebook; it only
   applies to grades saved afterwards.
 - Weights are only shown to graders and rubric managers, never to students.
+
+## Notes on the final grade
+
+- With weighting or numeric grading enabled the grade is calculated by `local\grade_calculator`; with both
+  disabled the upstream `get_grade()` code runs unchanged.
+- Without weighting the upstream formulas apply (with numeric grading every criterion goes from 0 to its maximum).
+- With weighting every criterion is normalised and averaged with its weight:
+  - `lockzeropoints` on: `f = Σ wᵢ·sᵢ/maxᵢ / Σ wᵢ`, grade = `max(min grade, f · max grade)`;
+  - `lockzeropoints` off: `f = Σ wᵢ·(sᵢ − minᵢ)/(maxᵢ − minᵢ) / Σ wᵢ`, grade = `min grade + f · (max grade − min grade)`.
+- Example: C1 (max 100, weight 3, grade 65) and C2 (max 10, weight 1, grade 2) give 53.75 / 100
+  (60.91 without weighting).
+- With equal weights the result equals upstream only when every criterion has the same maximum
+  (`lockzeropoints` on) or the same minimum and maximum (`lockzeropoints` off).
+- Criteria that cannot be normalised (maximum 0, or maximum equal to minimum) are left out; a criterion without
+  filling counts 0 with its weight. Rounding and scales work as upstream.
+- With numeric grading `get_min_max_score()` returns a minimum of 0, so the "minimum score is not 0" warning and
+  the grade mapping explanation are consistent with the ranges.
 
 ## Notes on numeric grading
 

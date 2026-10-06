@@ -33,6 +33,7 @@ use core_external\external_single_structure;
 use core_external\external_multiple_structure;
 use core_external\external_format_value;
 use gradingform_rubric_ranges\local\features;
+use gradingform_rubric_ranges\local\grade_calculator;
 use gradingform_rubric_ranges\local\range_resolver;
 use gradingform_rubric_ranges\local\validation_manager;
 use gradingform_rubric_ranges\local\weights;
@@ -831,6 +832,10 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
         if (!$this->is_form_available()) {
             return null;
         }
+        // IED extension: with numeric grading every criterion goes from 0 to its maximum.
+        if (features::numericgrading_enabled()) {
+            return range_resolver::min_max_score($this->get_definition()->rubric_criteria);
+        }
         $returnvalue = array('minscore' => 0, 'maxscore' => 0);
         foreach ($this->get_definition()->rubric_criteria as $id => $criterion) {
             $scores = array();
@@ -1114,13 +1119,19 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
     public function get_grade() {
         $grade = $this->get_rubric_filling();
 
-        // IED extension: with numeric grading every criterion goes from 0 to its maximum.
-        $numeric = features::numericgrading_enabled();
-        $scores = $this->get_controller()->get_min_max_score();
-        if ($scores && $numeric) {
-            $scores = range_resolver::min_max_score($this->get_controller()->get_definition()->rubric_criteria);
+        // IED extension: weighted and/or numeric grading.
+        if (features::weighting_enabled() || features::numericgrading_enabled()) {
+            $controller = $this->get_controller();
+            if (!$controller->is_form_available()) {
+                return -1;
+            }
+            return grade_calculator::calculate($controller->get_definition()->rubric_criteria, $grade,
+                $controller->get_options(), array_keys($controller->get_grade_range()),
+                (bool) $controller->get_allow_grade_decimals(), features::weighting_enabled(),
+                features::numericgrading_enabled());
         }
-        if (!$scores || $scores['maxscore'] <= $scores['minscore']) {
+
+        if (!($scores = $this->get_controller()->get_min_max_score()) || $scores['maxscore'] <= $scores['minscore']) {
             return -1;
         }
 
@@ -1134,11 +1145,6 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
 
         $curscore = 0;
         foreach ($grade['criteria'] as $id => $record) {
-            if ($numeric) {
-                $curscore += range_resolver::effective_grade(
-                    $this->get_controller()->get_definition()->rubric_criteria[$id], $record) ?? 0;
-                continue;
-            }
             $curscore += ($this->get_controller()->get_definition()->rubric_criteria[$id]['isranged'])
                         ? $record['grade']
                         : $this->get_controller()->get_definition()->rubric_criteria[$id]['levels'][$record['levelid']]['score'];
