@@ -1,0 +1,816 @@
+From 84d924fcc717e0e684933a86582136819f2fac5b Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Mon, 5 Oct 2026 17:12:08 +0200
+Subject: [PATCH 01/10] T0: add infrastructure for the IED extension
+
+- Site settings page (core does not load settings.php for gradingform
+  plugins) with three feature flags, all disabled by default:
+  enableweighting, enablenumericgrading, enablevalidation.
+- New capability gradingform/rubric_ranges:validate (no archetypes).
+- New tables gradingform_rubric_ranges_w (criteria weights) and
+  gradingform_rubric_ranges_h (validation history) with upgrade step,
+  accessed only through the persistent classes criterion_weight and
+  validation_history.
+- Fork versioning (2024112201 / 2024112200-ied1) and PATCHES.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                                |  84 ++++++++++++++++
+ classes/form/settings_form.php            |  55 +++++++++++
+ classes/local/features.php                | 113 ++++++++++++++++++++++
+ classes/persistent/criterion_weight.php   |  51 ++++++++++
+ classes/persistent/validation_history.php | 102 +++++++++++++++++++
+ db/access.php                             |  36 +++++++
+ db/install.php                            |  33 +++++++
+ db/install.xml                            |  51 +++++++++-
+ db/upgrade.php                            |  55 +++++++++++
+ lang/en/gradingform_rubric_ranges.php     |  12 +++
+ lib.php                                   |   5 +
+ settings_page.php                         |  69 +++++++++++++
+ version.php                               |   4 +-
+ 13 files changed, 667 insertions(+), 3 deletions(-)
+ create mode 100644 PATCHES.md
+ create mode 100644 classes/form/settings_form.php
+ create mode 100644 classes/local/features.php
+ create mode 100644 classes/persistent/criterion_weight.php
+ create mode 100644 classes/persistent/validation_history.php
+ create mode 100644 db/access.php
+ create mode 100644 db/install.php
+ create mode 100644 settings_page.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+new file mode 100644
+index 0000000..b33dc28
+--- /dev/null
++++ b/PATCHES.md
+@@ -0,0 +1,84 @@
++# IED fork of gradingform_rubric_ranges
++
++This branch (`ied/MOODLE_402_STABLE`) extends the upstream Catalyst plugin
++(<https://github.com/catalyst/moodle-gradingform_rubric_ranges>) with:
++
++- criteria weighting,
++- numeric grading per criterion with automatic range detection and feedback,
++- academic validation with history,
++- weighted final grade.
++
++Every feature is **disabled by default**. With all of them disabled the plugin behaves exactly like upstream.
++
++## Base version
++
++| | |
++|---|---|
++| Upstream branch | `MOODLE_402_STABLE` |
++| Upstream commit | `2aece39` (release `2024112200`) |
++| Fork version | `2024112201` / `2024112200-ied1` |
++| Moodle | 4.5 LTS |
++
++## Patch series
++
++One commit per task, applied in order:
++
++| Patch | Content |
++|---|---|
++| `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
++
++Further patches are added as each task is delivered.
++
++## Generating the patches
++
++```bash
++git format-patch 2aece39..ied/MOODLE_402_STABLE -o ../rubric_ranges_patches
++```
++
++The patch files are not committed in this branch; they are published with each `ied-vX.Y.Z` tag.
++
++## Applying the patches on a clean upstream copy
++
++From the plugin root (`grade/grading/form/rubric_ranges`), on upstream commit `2aece39`:
++
++```bash
++git am -3 /path/to/patches/*.patch
++```
++
++Without git:
++
++```bash
++for p in /path/to/patches/*.patch; do patch -p1 < "$p"; done
++```
++
++Then run `php admin/cli/upgrade.php` from the Moodle root.
++
++## Rebasing on a new upstream version
++
++```bash
++git fetch upstream
++git rebase upstream/MOODLE_402_STABLE ied/MOODLE_402_STABLE
++# resolve conflicts, run the PHPUnit suite, then regenerate the series
++```
++
++Versioning rule after a rebase:
++
++- `$plugin->version` = upstream version + 1,
++- `$plugin->release` = `<upstream release>-iedN`.
++
++The fork upgrade steps in `db/upgrade.php` are idempotent (`table_exists` checks) so they are safe if upstream ever reuses a version number.
++
++## Settings
++
++Core does not load `settings.php` for `gradingform` plugins, so the feature flags are managed in a dedicated page:
++
++- URL: `/grade/grading/form/rubric_ranges/settings_page.php` (requires `moodle/site:config`).
++- Link: "Ranged rubric settings" in the activity navigation of a ranged rubric, visible to site administrators.
++- CLI: `php admin/cli/cfg.php --component=gradingform_rubric_ranges --name=enableweighting --set=1`
++- `config.php`: `$CFG->forced_plugin_settings['gradingform_rubric_ranges']['enableweighting'] = 1;`
++
++Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes made in the page are recorded in the config changes report.
++
++## Capability
++
++`gradingform/rubric_ranges:validate` (module context). It is not granted to any archetype: grant it to the validator role, which must also be able to grade the activity (e.g. a copy of the teacher or manager role).
+diff --git a/classes/form/settings_form.php b/classes/form/settings_form.php
+new file mode 100644
+index 0000000..17bb3f5
+--- /dev/null
++++ b/classes/form/settings_form.php
+@@ -0,0 +1,55 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\form;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once($CFG->libdir . '/formslib.php');
++
++use gradingform_rubric_ranges\local\features;
++
++/**
++ * Site settings form of the IED extension.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class settings_form extends \moodleform {
++
++    /**
++     * Form definition.
++     */
++    protected function definition() {
++        global $CFG;
++
++        $mform = $this->_form;
++        $forced = $CFG->forced_plugin_settings[features::COMPONENT] ?? [];
++
++        foreach (features::all() as $name) {
++            $mform->addElement('advcheckbox', $name, get_string($name, 'gradingform_rubric_ranges'));
++            $mform->addHelpButton($name, $name, 'gradingform_rubric_ranges');
++            $mform->setType($name, PARAM_BOOL);
++            if (array_key_exists($name, $forced)) {
++                $mform->freeze($name);
++                $mform->addElement('static', $name . '_forced', '', get_string('settingforced', 'gradingform_rubric_ranges'));
++            }
++        }
++
++        $this->add_action_buttons(false);
++    }
++}
+diff --git a/classes/local/features.php b/classes/local/features.php
+new file mode 100644
+index 0000000..c7358a3
+--- /dev/null
++++ b/classes/local/features.php
+@@ -0,0 +1,113 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++/**
++ * Site-wide feature flags of the IED extension. All of them are disabled by default.
++ *
++ * gradingform plugins do not get a settings.php loaded by core, so these flags are
++ * managed through settings_page.php (or forced in config.php / admin/cli/cfg.php).
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class features {
++
++    /** @var string Plugin component used to store the flags. */
++    const COMPONENT = 'gradingform_rubric_ranges';
++
++    /** @var string Criteria weighting. */
++    const WEIGHTING = 'enableweighting';
++
++    /** @var string Numeric grade per criterion with automatic range and feedback. */
++    const NUMERICGRADING = 'enablenumericgrading';
++
++    /** @var string Academic validation of grades. */
++    const VALIDATION = 'enablevalidation';
++
++    /**
++     * Returns the list of feature flag names.
++     *
++     * @return string[]
++     */
++    public static function all(): array {
++        return [self::WEIGHTING, self::NUMERICGRADING, self::VALIDATION];
++    }
++
++    /**
++     * Whether the given flag is enabled.
++     *
++     * @param string $name one of the class constants
++     * @return bool
++     */
++    public static function is_enabled(string $name): bool {
++        return (bool) get_config(self::COMPONENT, $name);
++    }
++
++    /**
++     * Whether criteria weighting is enabled.
++     *
++     * @return bool
++     */
++    public static function weighting_enabled(): bool {
++        return self::is_enabled(self::WEIGHTING);
++    }
++
++    /**
++     * Whether numeric grading per criterion is enabled.
++     *
++     * @return bool
++     */
++    public static function numericgrading_enabled(): bool {
++        return self::is_enabled(self::NUMERICGRADING);
++    }
++
++    /**
++     * Whether academic validation is enabled.
++     *
++     * @return bool
++     */
++    public static function validation_enabled(): bool {
++        return self::is_enabled(self::VALIDATION);
++    }
++
++    /**
++     * Whether any of the extension features is enabled.
++     *
++     * @return bool
++     */
++    public static function any_enabled(): bool {
++        foreach (self::all() as $name) {
++            if (self::is_enabled($name)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    /**
++     * Stores the default value (disabled) for every flag that has no value yet.
++     */
++    public static function set_defaults(): void {
++        foreach (self::all() as $name) {
++            if (get_config(self::COMPONENT, $name) === false) {
++                set_config($name, 0, self::COMPONENT);
++            }
++        }
++    }
++}
+diff --git a/classes/persistent/criterion_weight.php b/classes/persistent/criterion_weight.php
+new file mode 100644
+index 0000000..5465586
+--- /dev/null
++++ b/classes/persistent/criterion_weight.php
+@@ -0,0 +1,51 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\persistent;
++
++use core\persistent;
++
++/**
++ * Weight of a rubric criterion (table gradingform_rubric_ranges_w).
++ *
++ * Data access only: business rules live in \gradingform_rubric_ranges\local\weights.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class criterion_weight extends persistent {
++
++    /** @var string Table name. */
++    const TABLE = 'gradingform_rubric_ranges_w';
++
++    /**
++     * Return the definition of the properties of this model.
++     *
++     * @return array
++     */
++    protected static function define_properties() {
++        return [
++            'criterionid' => [
++                'type' => PARAM_INT,
++            ],
++            'weight' => [
++                'type' => PARAM_INT,
++                'default' => 1,
++            ],
++        ];
++    }
++}
+diff --git a/classes/persistent/validation_history.php b/classes/persistent/validation_history.php
+new file mode 100644
+index 0000000..f16b9bd
+--- /dev/null
++++ b/classes/persistent/validation_history.php
+@@ -0,0 +1,102 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\persistent;
++
++use core\persistent;
++
++/**
++ * Validation history of a criterion grade (table gradingform_rubric_ranges_h).
++ *
++ * Stores the original teacher filling replaced by a validator. validatorid and timevalidated are
++ * business data kept apart from usermodified/timecreated, which change when a backup is restored.
++ *
++ * Data access only: business rules live in \gradingform_rubric_ranges\local\validation_manager.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class validation_history extends persistent {
++
++    /** @var string Table name. */
++    const TABLE = 'gradingform_rubric_ranges_h';
++
++    /**
++     * Return the definition of the properties of this model.
++     *
++     * @return array
++     */
++    protected static function define_properties() {
++        return [
++            'itemid' => [
++                'type' => PARAM_INT,
++            ],
++            'instanceid' => [
++                'type' => PARAM_INT,
++            ],
++            'criterionid' => [
++                'type' => PARAM_INT,
++            ],
++            'teacherlevelid' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'teachergrade' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'teacherremark' => [
++                'type' => PARAM_RAW,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'teacherremarkformat' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'teacherid' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'validatedlevelid' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'validatedgrade' => [
++                'type' => PARAM_INT,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'validatedremark' => [
++                'type' => PARAM_RAW,
++                'null' => NULL_ALLOWED,
++                'default' => null,
++            ],
++            'validatorid' => [
++                'type' => PARAM_INT,
++            ],
++            'timevalidated' => [
++                'type' => PARAM_INT,
++            ],
++        ];
++    }
++}
+diff --git a/db/access.php b/db/access.php
+new file mode 100644
+index 0000000..a8e7a5e
+--- /dev/null
++++ b/db/access.php
+@@ -0,0 +1,36 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * Capability definitions for gradingform_rubric_ranges.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++defined('MOODLE_INTERNAL') || die();
++
++$capabilities = [
++    // Academic validation of a grade given with a ranged rubric.
++    // Not granted to any archetype: it is assigned manually to the validator role.
++    'gradingform/rubric_ranges:validate' => [
++        'riskbitmask' => RISK_PERSONAL,
++        'captype' => 'write',
++        'contextlevel' => CONTEXT_MODULE,
++        'archetypes' => [],
++    ],
++];
+diff --git a/db/install.php b/db/install.php
+new file mode 100644
+index 0000000..11904b8
+--- /dev/null
++++ b/db/install.php
+@@ -0,0 +1,33 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * Post installation steps for gradingform_rubric_ranges.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++/**
++ * Stores the default value (disabled) of the IED feature flags.
++ *
++ * @return bool
++ */
++function xmldb_gradingform_rubric_ranges_install() {
++    \gradingform_rubric_ranges\local\features::set_defaults();
++    return true;
++}
+diff --git a/db/install.xml b/db/install.xml
+index d975d49..381c5f2 100644
+--- a/db/install.xml
++++ b/db/install.xml
+@@ -1,5 +1,5 @@
+ <?xml version="1.0" encoding="UTF-8" ?>
+-<XMLDB PATH="grade/grading/form/rubric_ranges/db" VERSION="20120122" COMMENT="XMLDB file for Monash Rubric Ranges"
++<XMLDB PATH="grade/grading/form/rubric_ranges/db" VERSION="20261005" COMMENT="XMLDB file for Monash Rubric Ranges"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="../../../../../lib/xmldb/xmldb.xsd"
+ >
+@@ -51,5 +51,54 @@
+         <INDEX NAME="ix_levelid" UNIQUE="false" FIELDS="levelid" COMMENT="levelid acts as a foreign key but null values are allowed"/>
+       </INDEXES>
+     </TABLE>
++    <TABLE NAME="gradingform_rubric_ranges_w" COMMENT="Stores the weight of each criterion in the final grade">
++      <FIELDS>
++        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
++        <FIELD NAME="criterionid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The rubric criterion this weight belongs to"/>
++        <FIELD NAME="weight" TYPE="int" LENGTH="2" NOTNULL="true" DEFAULT="1" SEQUENCE="false" COMMENT="Relative weight of the criterion (1-10)"/>
++        <FIELD NAME="usermodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++        <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++      </FIELDS>
++      <KEYS>
++        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
++        <KEY NAME="fk_criterionid" TYPE="foreign-unique" FIELDS="criterionid" REFTABLE="gradingform_rubric_ranges_c" REFFIELDS="id"/>
++        <KEY NAME="fk_usermodified" TYPE="foreign" FIELDS="usermodified" REFTABLE="user" REFFIELDS="id"/>
++      </KEYS>
++    </TABLE>
++    <TABLE NAME="gradingform_rubric_ranges_h" COMMENT="Validation history: original teacher filling replaced by a validator">
++      <FIELDS>
++        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
++        <FIELD NAME="itemid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The graded item (grading_instances.itemid), stable across grading instances"/>
++        <FIELD NAME="instanceid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The grading instance where the validation was saved"/>
++        <FIELD NAME="criterionid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The rubric criterion"/>
++        <FIELD NAME="teacherlevelid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Level selected by the teacher before the validation"/>
++        <FIELD NAME="teachergrade" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Grade given by the teacher before the validation"/>
++        <FIELD NAME="teacherremark" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Feedback given by the teacher before the validation"/>
++        <FIELD NAME="teacherremarkformat" TYPE="int" LENGTH="2" NOTNULL="false" SEQUENCE="false" COMMENT="The format of the teacher feedback"/>
++        <FIELD NAME="teacherid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="The teacher who gave the original grade"/>
++        <FIELD NAME="validatedlevelid" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Level resulting from the validation"/>
++        <FIELD NAME="validatedgrade" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Grade given by the validator"/>
++        <FIELD NAME="validatedremark" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Feedback given by the validator"/>
++        <FIELD NAME="validatorid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The user who validated the grade"/>
++        <FIELD NAME="timevalidated" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="When the grade was validated"/>
++        <FIELD NAME="usermodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++        <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false"/>
++      </FIELDS>
++      <KEYS>
++        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
++        <KEY NAME="fk_usermodified" TYPE="foreign" FIELDS="usermodified" REFTABLE="user" REFFIELDS="id"/>
++        <KEY NAME="fk_instanceid" TYPE="foreign" FIELDS="instanceid" REFTABLE="grading_instances" REFFIELDS="id"/>
++        <KEY NAME="fk_criterionid" TYPE="foreign" FIELDS="criterionid" REFTABLE="gradingform_rubric_ranges_c" REFFIELDS="id"/>
++        <KEY NAME="fk_teacherid" TYPE="foreign" FIELDS="teacherid" REFTABLE="user" REFFIELDS="id"/>
++        <KEY NAME="fk_validatorid" TYPE="foreign" FIELDS="validatorid" REFTABLE="user" REFFIELDS="id"/>
++      </KEYS>
++      <INDEXES>
++        <INDEX NAME="uq_itemid_criterionid" UNIQUE="true" FIELDS="itemid, criterionid" COMMENT="A grade can only be validated once"/>
++        <INDEX NAME="ix_teacherlevelid" UNIQUE="false" FIELDS="teacherlevelid" COMMENT="teacherlevelid acts as a foreign key but null values are allowed"/>
++        <INDEX NAME="ix_validatedlevelid" UNIQUE="false" FIELDS="validatedlevelid" COMMENT="validatedlevelid acts as a foreign key but null values are allowed"/>
++      </INDEXES>
++    </TABLE>
+   </TABLES>
+ </XMLDB>
+diff --git a/db/upgrade.php b/db/upgrade.php
+index c3ab7bf..9f6087a 100755
+--- a/db/upgrade.php
++++ b/db/upgrade.php
+@@ -60,5 +60,60 @@ function xmldb_gradingform_rubric_ranges_upgrade($oldversion) {
+         upgrade_plugin_savepoint(true, 2023071200, 'gradingform', 'rubric_ranges');
+     }
+ 
++    // IED extension: criteria weights and validation history.
++    if ($oldversion < 2024112201) {
++        // Define table gradingform_rubric_ranges_w to be created.
++        $table = new xmldb_table('gradingform_rubric_ranges_w');
++        $table->add_field('id', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, XMLDB_SEQUENCE, null);
++        $table->add_field('criterionid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('weight', XMLDB_TYPE_INTEGER, '2', null, XMLDB_NOTNULL, null, '1');
++        $table->add_field('usermodified', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_field('timecreated', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_field('timemodified', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_key('primary', XMLDB_KEY_PRIMARY, ['id']);
++        $table->add_key('fk_criterionid', XMLDB_KEY_FOREIGN_UNIQUE, ['criterionid'], 'gradingform_rubric_ranges_c', ['id']);
++        $table->add_key('fk_usermodified', XMLDB_KEY_FOREIGN, ['usermodified'], 'user', ['id']);
++        if (!$dbman->table_exists($table)) {
++            $dbman->create_table($table);
++        }
++
++        // Define table gradingform_rubric_ranges_h to be created.
++        $table = new xmldb_table('gradingform_rubric_ranges_h');
++        $table->add_field('id', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, XMLDB_SEQUENCE, null);
++        $table->add_field('itemid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('instanceid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('criterionid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('teacherlevelid', XMLDB_TYPE_INTEGER, '10', null, null, null, null);
++        $table->add_field('teachergrade', XMLDB_TYPE_INTEGER, '10', null, null, null, null);
++        $table->add_field('teacherremark', XMLDB_TYPE_TEXT, null, null, null, null, null);
++        $table->add_field('teacherremarkformat', XMLDB_TYPE_INTEGER, '2', null, null, null, null);
++        $table->add_field('teacherid', XMLDB_TYPE_INTEGER, '10', null, null, null, null);
++        $table->add_field('validatedlevelid', XMLDB_TYPE_INTEGER, '10', null, null, null, null);
++        $table->add_field('validatedgrade', XMLDB_TYPE_INTEGER, '10', null, null, null, null);
++        $table->add_field('validatedremark', XMLDB_TYPE_TEXT, null, null, null, null, null);
++        $table->add_field('validatorid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('timevalidated', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, null);
++        $table->add_field('usermodified', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_field('timecreated', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_field('timemodified', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
++        $table->add_key('primary', XMLDB_KEY_PRIMARY, ['id']);
++        $table->add_key('fk_usermodified', XMLDB_KEY_FOREIGN, ['usermodified'], 'user', ['id']);
++        $table->add_key('fk_instanceid', XMLDB_KEY_FOREIGN, ['instanceid'], 'grading_instances', ['id']);
++        $table->add_key('fk_criterionid', XMLDB_KEY_FOREIGN, ['criterionid'], 'gradingform_rubric_ranges_c', ['id']);
++        $table->add_key('fk_teacherid', XMLDB_KEY_FOREIGN, ['teacherid'], 'user', ['id']);
++        $table->add_key('fk_validatorid', XMLDB_KEY_FOREIGN, ['validatorid'], 'user', ['id']);
++        $table->add_index('uq_itemid_criterionid', XMLDB_INDEX_UNIQUE, ['itemid', 'criterionid']);
++        $table->add_index('ix_teacherlevelid', XMLDB_INDEX_NOTUNIQUE, ['teacherlevelid']);
++        $table->add_index('ix_validatedlevelid', XMLDB_INDEX_NOTUNIQUE, ['validatedlevelid']);
++        if (!$dbman->table_exists($table)) {
++            $dbman->create_table($table);
++        }
++
++        // Feature flags are disabled by default.
++        \gradingform_rubric_ranges\local\features::set_defaults();
++
++        upgrade_plugin_savepoint(true, 2024112201, 'gradingform', 'rubric_ranges');
++    }
++
+     return true;
+ }
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index 4b4b89d..9c4adb9 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -108,3 +108,15 @@ $string['sortlevelsasc0'] = 'Descending by number of points';
+ $string['sortlevelsasc1'] = 'Ascending by number of points';
+ $string['zerolevelsabsent'] = 'Warning: The minimum possible score for this rubric is not 0; this can result in unexpected grades for the activity. To avoid this, each criterion should have a level with 0 points.<br>
+ This warning may be ignored if a scale is used for grading, and the minimum levels in the rubric correspond to the minimum value of the scale.';
++
++// IED extension strings.
++$string['enablenumericgrading'] = 'Enable numeric grading';
++$string['enablenumericgrading_help'] = 'If enabled, the grader enters a numeric grade for every criterion. The matching level is selected automatically and its definition is proposed as feedback, which can be edited.';
++$string['enablevalidation'] = 'Enable academic validation';
++$string['enablevalidation_help'] = 'If enabled, users with the capability \'gradingform/rubric_ranges:validate\' can validate a grade once: the validator grade and feedback replace the teacher ones, which are kept in the validation history.';
++$string['enableweighting'] = 'Enable criteria weighting';
++$string['enableweighting_help'] = 'If enabled, every criterion has a weight from 1 to 10 and the final grade is the weighted average of the criteria. When all criteria have the same weight and maximum score the grade is the same as without weighting.';
++$string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
++$string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
++$string['settingspage'] = 'Ranged rubric settings';
++$string['settingssaved'] = 'Changes saved';
+diff --git a/lib.php b/lib.php
+index ee117bc..edc8e8f 100644
+--- a/lib.php
++++ b/lib.php
+@@ -77,6 +77,11 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+         $node->add(get_string('definerubric', 'gradingform_rubric_ranges'),
+             $this->get_editor_url(), settings_navigation::TYPE_CUSTOM,
+             null, null, new pix_icon('icon', '', 'gradingform_rubric_ranges'));
++        // IED extension: site settings page (core does not load settings.php for gradingform plugins).
++        if (has_capability('moodle/site:config', context_system::instance())) {
++            $node->add(get_string('settingspage', 'gradingform_rubric_ranges'),
++                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'), settings_navigation::TYPE_CUSTOM);
++        }
+     }
+ 
+     /**
+diff --git a/settings_page.php b/settings_page.php
+new file mode 100644
+index 0000000..f24cdc5
+--- /dev/null
++++ b/settings_page.php
+@@ -0,0 +1,69 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * Site settings page of the IED extension.
++ *
++ * Core does not load settings.php for gradingform plugins, so the feature flags are managed here.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++require_once(__DIR__ . '/../../../../config.php');
++
++use gradingform_rubric_ranges\form\settings_form;
++use gradingform_rubric_ranges\local\features;
++
++require_login();
++$context = context_system::instance();
++require_capability('moodle/site:config', $context);
++
++$url = new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php');
++$PAGE->set_context($context);
++$PAGE->set_url($url);
++$PAGE->set_pagelayout('admin');
++$PAGE->set_title(get_string('settingspage', 'gradingform_rubric_ranges'));
++$PAGE->set_heading(get_string('settingspage', 'gradingform_rubric_ranges'));
++
++$form = new settings_form($url);
++
++$current = [];
++foreach (features::all() as $name) {
++    $current[$name] = (int) features::is_enabled($name);
++}
++$form->set_data($current);
++
++if ($data = $form->get_data()) {
++    $forced = $CFG->forced_plugin_settings[features::COMPONENT] ?? [];
++    foreach (features::all() as $name) {
++        if (array_key_exists($name, $forced) || !isset($data->$name)) {
++            continue;
++        }
++        $new = (int) !empty($data->$name);
++        if ($new !== $current[$name]) {
++            add_to_config_log($name, $current[$name], $new, features::COMPONENT);
++            set_config($name, $new, features::COMPONENT);
++        }
++    }
++    redirect($url, get_string('settingssaved', 'gradingform_rubric_ranges'), null,
++        \core\output\notification::NOTIFY_SUCCESS);
++}
++
++echo $OUTPUT->header();
++$form->display();
++echo $OUTPUT->footer();
+diff --git a/version.php b/version.php
+index a4f9903..fcb9a88 100644
+--- a/version.php
++++ b/version.php
+@@ -25,8 +25,8 @@
+ defined('MOODLE_INTERNAL') || die();
+ 
+ $plugin->component = 'gradingform_rubric_ranges';
+-$plugin->version  = 2024112200;    // The current plugin version (Date: YYYYMMDDXX).
+-$plugin->release  = 2024112200;    // Match release exactly to version.
++$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
++$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
+ $plugin->requires = 2023042400;    // Requires Moodle 4.2.0 or later.
+ $plugin->maturity = MATURITY_STABLE;
+ $plugin->supported = [402, 405];
+-- 
+2.39.2.windows.1
+

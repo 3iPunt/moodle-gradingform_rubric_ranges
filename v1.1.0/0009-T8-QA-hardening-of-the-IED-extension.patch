@@ -1,0 +1,1489 @@
+From 05e4cb152c518f4308a58a050f6e48ed0b53285c Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Thu, 15 Oct 2026 10:38:09 +0200
+Subject: [PATCH 09/10] T8: QA hardening of the IED extension
+
+- Declare Moodle 4.5 only (requires 2024100700, supported [405, 405]):
+  the fork is only tested on 4.5.
+- Escape the validator name in the "Grade validated by" badge.
+- weights_editor: attach the listeners at once (the localised strings are
+  loaded in the background) and recalculate on "Add criterion"; use a
+  timeout instead of requestAnimationFrame, which does not run in pages
+  that are not painted. Found in the browser QA.
+- grade_validated event: instanceid as an integer.
+- End to end test through assign::save_grade() down to the gradebook:
+  weighted teacher grade, validated grade and ignored regrade; upstream
+  grade with every feature disabled.
+- Coding style (moodle-cs) of the lines added by the fork; upstream code
+  is not reformatted.
+- PATCHES.md: setup guide for site administrators and accepted
+  limitations.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                                    |  35 ++++-
+ amd/build/weights_editor.min.js               |   2 +-
+ amd/build/weights_editor.min.js.map           |   2 +-
+ amd/src/weights_editor.js                     |  30 ++--
+ ...gradingform_rubric_ranges_plugin.class.php |  10 +-
+ ...gradingform_rubric_ranges_plugin.class.php |  16 ++-
+ classes/event/grade_validated.php             |   1 -
+ classes/form/settings_form.php                |   1 -
+ classes/local/features.php                    |   1 -
+ classes/local/grade_calculator.php            |  12 +-
+ classes/local/range_resolver.php              |   7 +-
+ classes/local/validation_manager.php          |  15 +-
+ classes/local/weights.php                     |   1 -
+ classes/persistent/criterion_weight.php       |   1 -
+ classes/persistent/validation_history.php     |   1 -
+ classes/privacy/provider.php                  |  17 +--
+ lib.php                                       |  48 +++++--
+ renderer.php                                  |  50 ++++---
+ settings_page.php                             |   8 +-
+ tests/assign_gradebook_test.php               | 115 +++++++++++++++
+ tests/backup_restore_test.php                 |  28 +++-
+ tests/event/grade_validated_test.php          |   1 +
+ tests/ied_test_helper.php                     |   1 -
+ tests/local/grade_calculator_test.php         | 132 ++++++++++++++----
+ tests/local/range_resolver_test.php           |  20 +--
+ tests/local/validation_manager_test.php       |  52 +++++--
+ tests/local/weights_test.php                  |   8 +-
+ tests/privacy/provider_ied_test.php           |  33 +++--
+ tests/renderer_test.php                       |  53 +++++--
+ version.php                                   |   4 +-
+ 30 files changed, 531 insertions(+), 174 deletions(-)
+ create mode 100644 tests/assign_gradebook_test.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index 77f8565..891c412 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -17,7 +17,7 @@ Every feature is **disabled by default**. With all of them disabled the plugin b
+ | Upstream branch | `MOODLE_402_STABLE` |
+ | Upstream commit | `2aece39` (release `2024112200`) |
+ | Fork version | `2024112201` / `2024112200-ied1` |
+-| Moodle | 4.5 LTS |
++| Moodle | 4.5 LTS only (`requires = 2024100700`, `supported = [405, 405]`): the fork is only tested on 4.5 |
+ 
+ ## Patch series
+ 
+@@ -33,8 +33,37 @@ One commit per task, applied in order:
+ | `0006-T5-…` | Backup and restore of weights and validation history |
+ | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
+ | `0008-T7-…` | PHPUnit tests of the IED extension |
+-
+-Further patches are added as each task is delivered.
++| `0009-T8-…` | QA hardening: Moodle 4.5 only, escaping, end to end gradebook test, coding style of the fork lines, setup guide |
++
++## Setting up the extension (site administrator)
++
++1. Apply the patches and run `php admin/cli/upgrade.php` (or visit *Site administration > Notifications*).
++2. Open `/grade/grading/form/rubric_ranges/settings_page.php` (also linked as "Ranged rubric settings" in the
++   activity navigation of a ranged rubric) and enable the features needed: weighting, numeric grading, validation.
++3. For validation, create a validator role:
++   - *Site administration > Users > Permissions > Define roles > Add a new role*, based on the **Teacher** (or
++     Manager) archetype so it can grade the activity;
++   - allow `gradingform/rubric_ranges:validate`;
++   - assign it in the course (or category) to the validators. The validator must not be the teacher who grades:
++     a user cannot validate their own grade, and a validator cannot give the first grade.
++   - Site administrators are **not** validators unless they get this role.
++4. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
++   automatically (the rubric editor warns otherwise).
++5. Quick check: grade a student with the rubric, validate the grade with the validator, and check the gradebook and
++   the log (*Ranged rubric grade validated*).
++
++## Accepted limitations
++
++| Limitation | Reason |
++|---|---|
++| The grader side panel (forum) does not show the weights, the numeric grade or the validation | Out of scope; the lock of validated grades also applies there |
++| Validating needs JavaScript | The "Validate" button swaps the read only rubric for the editable one |
++| The `grade_validated` event has no `relateduserid` | There is no generic API to get the graded user from a grading item |
++| `DISPLAY_EVAL_FROZEN` does not render the points cell | Upstream behaviour; the stored grade is kept |
++| The privacy export of the grading is keyed by criterion description | Upstream export contract |
++| Enabling or disabling weighting does not recalculate grades already in the gradebook | Only grades saved afterwards use the new setting |
++| The grader side panel PHPUnit tests error on Moodle 4.5 | Upstream issue (MDL-76583), see Tests |
++| `moodle-cs` reports errors in upstream code | Upstream predates the current standard; only the lines added by the fork are kept clean (except a few lines inside upstream constructs and the language strings kept as a block at the end of the file to reduce patch conflicts) |
+ 
+ ## Generating the patches
+ 
+diff --git a/amd/build/weights_editor.min.js b/amd/build/weights_editor.min.js
+index 936911b..448bca2 100644
+--- a/amd/build/weights_editor.min.js
++++ b/amd/build/weights_editor.min.js
+@@ -9,6 +9,6 @@ define("gradingform_rubric_ranges/weights_editor",["exports","core/str"],(functi
+    * @copyright  2026 Tresipunt
+    * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+    */
+-const SELECTORS_WEIGHT="select.weightselect",SELECTORS_PERCENT=".weightpercent",SELECTORS_CRITERION="tr.criterion";let percentTemplate="{$a} %",decimalSeparator=".";const recalculate=root=>{const selects=Array.from(root.querySelectorAll(SELECTORS_WEIGHT)),total=selects.reduce(((sum,select)=>sum+(parseInt(select.value,10)||0)),0);selects.forEach((select=>{var _select$closest;const percent=null===(_select$closest=select.closest(".weight"))||void 0===_select$closest?void 0:_select$closest.querySelector(SELECTORS_PERCENT);if(percent){const weight=parseInt(select.value,10)||0,text=total?(value=>{const formatted=String(Math.round(10*value)/10).replace(".",decimalSeparator);return percentTemplate.replace("{$a}",formatted)})(weight/total*100):"";percent.textContent!==text&&(percent.textContent=text)}}))};_exports.init=async name=>{const root=document.getElementById("rubric-".concat(name));if(!root)return;try{[percentTemplate,decimalSeparator]=await(0,_str.getStrings)([{key:"weightpercent",component:"gradingform_rubric_ranges",param:"{$a}"},{key:"decsep",component:"langconfig"}])}catch(e){}root.addEventListener("change",(e=>{e.target.matches(SELECTORS_WEIGHT)&&recalculate(root)})),root.addEventListener("click",(e=>{e.target.matches('input[type=submit][id$="-duplicate"]')&&(((root,button)=>{var _button$closest;const source=null===(_button$closest=button.closest(SELECTORS_CRITERION))||void 0===_button$closest?void 0:_button$closest.querySelector(SELECTORS_WEIGHT),criteria=root.querySelectorAll(SELECTORS_CRITERION),target=criteria.length?criteria[criteria.length-1].querySelector(SELECTORS_WEIGHT):null;source&&target&&source!==target&&(target.value=source.value)})(root,e.target),recalculate(root))}));let scheduled=!1;new MutationObserver((()=>{scheduled||(scheduled=!0,window.requestAnimationFrame((()=>{scheduled=!1,recalculate(root)})))})).observe(root,{childList:!0,subtree:!0}),recalculate(root)}}));
++const SELECTORS_WEIGHT="select.weightselect",SELECTORS_PERCENT=".weightpercent",SELECTORS_CRITERION="tr.criterion";let percentTemplate="{$a} %",decimalSeparator=".";const recalculate=root=>{const selects=Array.from(root.querySelectorAll(SELECTORS_WEIGHT)),total=selects.reduce(((sum,select)=>sum+(parseInt(select.value,10)||0)),0);selects.forEach((select=>{var _select$closest;const percent=null===(_select$closest=select.closest(".weight"))||void 0===_select$closest?void 0:_select$closest.querySelector(SELECTORS_PERCENT);if(percent){const weight=parseInt(select.value,10)||0,text=total?(value=>{const formatted=String(Math.round(10*value)/10).replace(".",decimalSeparator);return percentTemplate.replace("{$a}",formatted)})(weight/total*100):"";percent.textContent!==text&&(percent.textContent=text)}}))};_exports.init=name=>{const root=document.getElementById("rubric-".concat(name));if(!root)return;(0,_str.getStrings)([{key:"weightpercent",component:"gradingform_rubric_ranges",param:"{$a}"},{key:"decsep",component:"langconfig"}]).then((_ref=>{let[template,separator]=_ref;return percentTemplate=template,decimalSeparator=separator,recalculate(root),null})).catch((()=>{})),root.addEventListener("change",(e=>{e.target.matches(SELECTORS_WEIGHT)&&recalculate(root)})),root.addEventListener("click",(e=>{e.target.matches('input[type=submit][id$="-duplicate"]')?(((root,button)=>{var _button$closest;const source=null===(_button$closest=button.closest(SELECTORS_CRITERION))||void 0===_button$closest?void 0:_button$closest.querySelector(SELECTORS_WEIGHT),criteria=root.querySelectorAll(SELECTORS_CRITERION),target=criteria.length?criteria[criteria.length-1].querySelector(SELECTORS_WEIGHT):null;source&&target&&source!==target&&(target.value=source.value)})(root,e.target),recalculate(root)):e.target.matches('input[type=submit][id$="-addcriterion"]')&&recalculate(root)}));let scheduled=!1;new MutationObserver((()=>{scheduled||(scheduled=!0,setTimeout((()=>{scheduled=!1,recalculate(root)}),0))})).observe(root,{childList:!0,subtree:!0}),recalculate(root)}}));
+ 
+ //# sourceMappingURL=weights_editor.min.js.map
+\ No newline at end of file
+diff --git a/amd/build/weights_editor.min.js.map b/amd/build/weights_editor.min.js.map
+index e658df6..cfb5658 100644
+--- a/amd/build/weights_editor.min.js.map
++++ b/amd/build/weights_editor.min.js.map
+@@ -1 +1 @@
+-{"version":3,"file":"weights_editor.min.js","sources":["../src/weights_editor.js"],"sourcesContent":["// This file is part of Moodle - http://moodle.org/\n//\n// Moodle is free software: you can redistribute it and/or modify\n// it under the terms of the GNU General Public License as published by\n// the Free Software Foundation, either version 3 of the License, or\n// (at your option) any later version.\n//\n// Moodle is distributed in the hope that it will be useful,\n// but WITHOUT ANY WARRANTY; without even the implied warranty of\n// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n// GNU General Public License for more details.\n//\n// You should have received a copy of the GNU General Public License\n// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.\n\n/**\n * IED extension: live weight percentages in the ranged rubric editor.\n *\n * Works next to the upstream YUI editor (js/rubricrangeseditor.js) without modifying it:\n * criteria added, duplicated or deleted by YUI are detected with a MutationObserver.\n *\n * @module     gradingform_rubric_ranges/weights_editor\n * @copyright  2026 Tresipunt\n * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later\n */\n\nimport {getStrings} from 'core/str';\n\nconst SELECTORS = {\n    WEIGHT: 'select.weightselect',\n    PERCENT: '.weightpercent',\n    CRITERION: 'tr.criterion',\n};\n\n/** @type {string} Template of the percentage string, with a placeholder for the value. */\nlet percentTemplate = '{$a} %';\n\n/** @type {string} Decimal separator of the current language. */\nlet decimalSeparator = '.';\n\n/**\n * Formats a percentage with one decimal, removing trailing zeros.\n *\n * @param {Number} value\n * @returns {String}\n */\nconst formatPercent = (value) => {\n    const formatted = String(Math.round(value * 10) / 10).replace('.', decimalSeparator);\n    return percentTemplate.replace('{$a}', formatted);\n};\n\n/**\n * Recalculates the percentage of every criterion of the rubric.\n *\n * @param {HTMLElement} root the rubric editor container\n */\nconst recalculate = (root) => {\n    const selects = Array.from(root.querySelectorAll(SELECTORS.WEIGHT));\n    const total = selects.reduce((sum, select) => sum + (parseInt(select.value, 10) || 0), 0);\n    selects.forEach((select) => {\n        const percent = select.closest('.weight')?.querySelector(SELECTORS.PERCENT);\n        if (percent) {\n            const weight = parseInt(select.value, 10) || 0;\n            const text = total ? formatPercent(weight / total * 100) : '';\n            // Only write when changed: writing always would retrigger the MutationObserver endlessly.\n            if (percent.textContent !== text) {\n                percent.textContent = text;\n            }\n        }\n    });\n};\n\n/**\n * Copies the weight of the duplicated criterion to the new one (YUI creates it with the default weight).\n *\n * The YUI handler is attached to the button itself, so when the click bubbles here the new row already exists.\n *\n * @param {HTMLElement} root the rubric editor container\n * @param {HTMLElement} button the duplicate button\n */\nconst copyDuplicatedWeight = (root, button) => {\n    const source = button.closest(SELECTORS.CRITERION)?.querySelector(SELECTORS.WEIGHT);\n    const criteria = root.querySelectorAll(SELECTORS.CRITERION);\n    const target = criteria.length ? criteria[criteria.length - 1].querySelector(SELECTORS.WEIGHT) : null;\n    if (source && target && source !== target) {\n        target.value = source.value;\n    }\n};\n\n/**\n * Initialises the weights editor.\n *\n * @param {String} name the rubric editor element name\n */\nexport const init = async(name) => {\n    const root = document.getElementById(`rubric-${name}`);\n    if (!root) {\n        return;\n    }\n\n    try {\n        [percentTemplate, decimalSeparator] = await getStrings([\n            {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},\n            {key: 'decsep', component: 'langconfig'},\n        ]);\n    } catch (e) {\n        // Keep the defaults.\n    }\n\n    root.addEventListener('change', (e) => {\n        if (e.target.matches(SELECTORS.WEIGHT)) {\n            recalculate(root);\n        }\n    });\n\n    root.addEventListener('click', (e) => {\n        if (e.target.matches('input[type=submit][id$=\"-duplicate\"]')) {\n            copyDuplicatedWeight(root, e.target);\n            recalculate(root);\n        }\n    });\n\n    // Criteria added or deleted by the YUI editor (deletion happens after a confirmation dialog).\n    let scheduled = false;\n    const observer = new MutationObserver(() => {\n        if (!scheduled) {\n            scheduled = true;\n            window.requestAnimationFrame(() => {\n                scheduled = false;\n                recalculate(root);\n            });\n        }\n    });\n    observer.observe(root, {childList: true, subtree: true});\n\n    recalculate(root);\n};\n"],"names":["SELECTORS","percentTemplate","decimalSeparator","recalculate","root","selects","Array","from","querySelectorAll","total","reduce","sum","select","parseInt","value","forEach","percent","closest","_select$closest","querySelector","weight","text","formatted","String","Math","round","replace","formatPercent","textContent","async","document","getElementById","name","key","component","param","e","addEventListener","target","matches","button","source","_button$closest","criteria","length","copyDuplicatedWeight","scheduled","MutationObserver","window","requestAnimationFrame","observe","childList","subtree"],"mappings":";;;;;;;;;;;MA4BMA,iBACM,sBADNA,kBAEO,iBAFPA,oBAGS,mBAIXC,gBAAkB,SAGlBC,iBAAmB,UAkBjBC,YAAeC,aACXC,QAAUC,MAAMC,KAAKH,KAAKI,iBAAiBR,mBAC3CS,MAAQJ,QAAQK,QAAO,CAACC,IAAKC,SAAWD,KAAOE,SAASD,OAAOE,MAAO,KAAO,IAAI,GACvFT,QAAQU,SAASH,mCACPI,gCAAUJ,OAAOK,QAAQ,6CAAfC,gBAA2BC,cAAcnB,sBACrDgB,QAAS,OACHI,OAASP,SAASD,OAAOE,MAAO,KAAO,EACvCO,KAAOZ,MAjBFK,CAAAA,cACbQ,UAAYC,OAAOC,KAAKC,MAAc,GAARX,OAAc,IAAIY,QAAQ,IAAKxB,yBAC5DD,gBAAgByB,QAAQ,OAAQJ,YAeVK,CAAcP,OAASX,MAAQ,KAAO,GAEvDO,QAAQY,cAAgBP,OACxBL,QAAQY,YAAcP,yBA4BlBQ,MAAAA,aACVzB,KAAO0B,SAASC,gCAAyBC,WAC1C5B,iBAKAH,gBAAiBC,wBAA0B,mBAAW,CACnD,CAAC+B,IAAK,gBAAiBC,UAAW,4BAA6BC,MAAO,QACtE,CAACF,IAAK,SAAUC,UAAW,gBAEjC,MAAOE,IAIThC,KAAKiC,iBAAiB,UAAWD,IACzBA,EAAEE,OAAOC,QAAQvC,mBACjBG,YAAYC,SAIpBA,KAAKiC,iBAAiB,SAAUD,IACxBA,EAAEE,OAAOC,QAAQ,0CApCA,EAACnC,KAAMoC,oCAC1BC,+BAASD,OAAOvB,QAAQjB,uDAAf0C,gBAAqCvB,cAAcnB,kBAC5D2C,SAAWvC,KAAKI,iBAAiBR,qBACjCsC,OAASK,SAASC,OAASD,SAASA,SAASC,OAAS,GAAGzB,cAAcnB,kBAAoB,KAC7FyC,QAAUH,QAAUG,SAAWH,SAC/BA,OAAOxB,MAAQ2B,OAAO3B,QAgClB+B,CAAqBzC,KAAMgC,EAAEE,QAC7BnC,YAAYC,cAKhB0C,WAAY,EACC,IAAIC,kBAAiB,KAC7BD,YACDA,WAAY,EACZE,OAAOC,uBAAsB,KACzBH,WAAY,EACZ3C,YAAYC,aAIf8C,QAAQ9C,KAAM,CAAC+C,WAAW,EAAMC,SAAS,IAElDjD,YAAYC"}
+\ No newline at end of file
++{"version":3,"file":"weights_editor.min.js","sources":["../src/weights_editor.js"],"sourcesContent":["// This file is part of Moodle - http://moodle.org/\n//\n// Moodle is free software: you can redistribute it and/or modify\n// it under the terms of the GNU General Public License as published by\n// the Free Software Foundation, either version 3 of the License, or\n// (at your option) any later version.\n//\n// Moodle is distributed in the hope that it will be useful,\n// but WITHOUT ANY WARRANTY; without even the implied warranty of\n// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n// GNU General Public License for more details.\n//\n// You should have received a copy of the GNU General Public License\n// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.\n\n/**\n * IED extension: live weight percentages in the ranged rubric editor.\n *\n * Works next to the upstream YUI editor (js/rubricrangeseditor.js) without modifying it:\n * criteria added, duplicated or deleted by YUI are detected with a MutationObserver.\n *\n * @module     gradingform_rubric_ranges/weights_editor\n * @copyright  2026 Tresipunt\n * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later\n */\n\nimport {getStrings} from 'core/str';\n\nconst SELECTORS = {\n    WEIGHT: 'select.weightselect',\n    PERCENT: '.weightpercent',\n    CRITERION: 'tr.criterion',\n};\n\n/** @type {string} Template of the percentage string, with a placeholder for the value. */\nlet percentTemplate = '{$a} %';\n\n/** @type {string} Decimal separator of the current language. */\nlet decimalSeparator = '.';\n\n/**\n * Formats a percentage with one decimal, removing trailing zeros.\n *\n * @param {Number} value\n * @returns {String}\n */\nconst formatPercent = (value) => {\n    const formatted = String(Math.round(value * 10) / 10).replace('.', decimalSeparator);\n    return percentTemplate.replace('{$a}', formatted);\n};\n\n/**\n * Recalculates the percentage of every criterion of the rubric.\n *\n * @param {HTMLElement} root the rubric editor container\n */\nconst recalculate = (root) => {\n    const selects = Array.from(root.querySelectorAll(SELECTORS.WEIGHT));\n    const total = selects.reduce((sum, select) => sum + (parseInt(select.value, 10) || 0), 0);\n    selects.forEach((select) => {\n        const percent = select.closest('.weight')?.querySelector(SELECTORS.PERCENT);\n        if (percent) {\n            const weight = parseInt(select.value, 10) || 0;\n            const text = total ? formatPercent(weight / total * 100) : '';\n            // Only write when changed: writing always would retrigger the MutationObserver endlessly.\n            if (percent.textContent !== text) {\n                percent.textContent = text;\n            }\n        }\n    });\n};\n\n/**\n * Copies the weight of the duplicated criterion to the new one (YUI creates it with the default weight).\n *\n * The YUI handler is attached to the button itself, so when the click bubbles here the new row already exists.\n *\n * @param {HTMLElement} root the rubric editor container\n * @param {HTMLElement} button the duplicate button\n */\nconst copyDuplicatedWeight = (root, button) => {\n    const source = button.closest(SELECTORS.CRITERION)?.querySelector(SELECTORS.WEIGHT);\n    const criteria = root.querySelectorAll(SELECTORS.CRITERION);\n    const target = criteria.length ? criteria[criteria.length - 1].querySelector(SELECTORS.WEIGHT) : null;\n    if (source && target && source !== target) {\n        target.value = source.value;\n    }\n};\n\n/**\n * Initialises the weights editor.\n *\n * @param {String} name the rubric editor element name\n */\nexport const init = (name) => {\n    const root = document.getElementById(`rubric-${name}`);\n    if (!root) {\n        return;\n    }\n\n    // Listeners are attached at once; the localised strings arrive later and trigger a new calculation.\n    getStrings([\n        {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},\n        {key: 'decsep', component: 'langconfig'},\n    ]).then(([template, separator]) => {\n        percentTemplate = template;\n        decimalSeparator = separator;\n        recalculate(root);\n        return null;\n    }).catch(() => {\n        // Keep the defaults.\n    });\n\n    root.addEventListener('change', (e) => {\n        if (e.target.matches(SELECTORS.WEIGHT)) {\n            recalculate(root);\n        }\n    });\n\n    // The YUI handlers are attached to the buttons themselves, so the DOM is already updated here.\n    root.addEventListener('click', (e) => {\n        if (e.target.matches('input[type=submit][id$=\"-duplicate\"]')) {\n            copyDuplicatedWeight(root, e.target);\n            recalculate(root);\n        } else if (e.target.matches('input[type=submit][id$=\"-addcriterion\"]')) {\n            recalculate(root);\n        }\n    });\n\n    // Any other change of the criteria (e.g. deletion, which happens after a confirmation dialog).\n    // A timeout is used instead of requestAnimationFrame, which does not run in pages that are not painted.\n    let scheduled = false;\n    const observer = new MutationObserver(() => {\n        if (!scheduled) {\n            scheduled = true;\n            setTimeout(() => {\n                scheduled = false;\n                recalculate(root);\n            }, 0);\n        }\n    });\n    observer.observe(root, {childList: true, subtree: true});\n\n    recalculate(root);\n};\n"],"names":["SELECTORS","percentTemplate","decimalSeparator","recalculate","root","selects","Array","from","querySelectorAll","total","reduce","sum","select","parseInt","value","forEach","percent","closest","_select$closest","querySelector","weight","text","formatted","String","Math","round","replace","formatPercent","textContent","name","document","getElementById","key","component","param","then","_ref","template","separator","catch","addEventListener","e","target","matches","button","source","_button$closest","criteria","length","copyDuplicatedWeight","scheduled","MutationObserver","setTimeout","observe","childList","subtree"],"mappings":";;;;;;;;;;;MA4BMA,iBACM,sBADNA,kBAEO,iBAFPA,oBAGS,mBAIXC,gBAAkB,SAGlBC,iBAAmB,UAkBjBC,YAAeC,aACXC,QAAUC,MAAMC,KAAKH,KAAKI,iBAAiBR,mBAC3CS,MAAQJ,QAAQK,QAAO,CAACC,IAAKC,SAAWD,KAAOE,SAASD,OAAOE,MAAO,KAAO,IAAI,GACvFT,QAAQU,SAASH,mCACPI,gCAAUJ,OAAOK,QAAQ,6CAAfC,gBAA2BC,cAAcnB,sBACrDgB,QAAS,OACHI,OAASP,SAASD,OAAOE,MAAO,KAAO,EACvCO,KAAOZ,MAjBFK,CAAAA,cACbQ,UAAYC,OAAOC,KAAKC,MAAc,GAARX,OAAc,IAAIY,QAAQ,IAAKxB,yBAC5DD,gBAAgByB,QAAQ,OAAQJ,YAeVK,CAAcP,OAASX,MAAQ,KAAO,GAEvDO,QAAQY,cAAgBP,OACxBL,QAAQY,YAAcP,yBA4BjBQ,aACXzB,KAAO0B,SAASC,gCAAyBF,WAC1CzB,gCAKM,CACP,CAAC4B,IAAK,gBAAiBC,UAAW,4BAA6BC,MAAO,QACtE,CAACF,IAAK,SAAUC,UAAW,gBAC5BE,MAAKC,WAAEC,SAAUC,uBAChBrC,gBAAkBoC,SAClBnC,iBAAmBoC,UACnBnC,YAAYC,MACL,QACRmC,OAAM,SAITnC,KAAKoC,iBAAiB,UAAWC,IACzBA,EAAEC,OAAOC,QAAQ3C,mBACjBG,YAAYC,SAKpBA,KAAKoC,iBAAiB,SAAUC,IACxBA,EAAEC,OAAOC,QAAQ,yCAzCA,EAACvC,KAAMwC,oCAC1BC,+BAASD,OAAO3B,QAAQjB,uDAAf8C,gBAAqC3B,cAAcnB,kBAC5D+C,SAAW3C,KAAKI,iBAAiBR,qBACjC0C,OAASK,SAASC,OAASD,SAASA,SAASC,OAAS,GAAG7B,cAAcnB,kBAAoB,KAC7F6C,QAAUH,QAAUG,SAAWH,SAC/BA,OAAO5B,MAAQ+B,OAAO/B,QAqClBmC,CAAqB7C,KAAMqC,EAAEC,QAC7BvC,YAAYC,OACLqC,EAAEC,OAAOC,QAAQ,4CACxBxC,YAAYC,aAMhB8C,WAAY,EACC,IAAIC,kBAAiB,KAC7BD,YACDA,WAAY,EACZE,YAAW,KACPF,WAAY,EACZ/C,YAAYC,QACb,OAGFiD,QAAQjD,KAAM,CAACkD,WAAW,EAAMC,SAAS,IAElDpD,YAAYC"}
+\ No newline at end of file
+diff --git a/amd/src/weights_editor.js b/amd/src/weights_editor.js
+index 72c5833..bb152d9 100644
+--- a/amd/src/weights_editor.js
++++ b/amd/src/weights_editor.js
+@@ -92,20 +92,24 @@ const copyDuplicatedWeight = (root, button) => {
+  *
+  * @param {String} name the rubric editor element name
+  */
+-export const init = async(name) => {
++export const init = (name) => {
+     const root = document.getElementById(`rubric-${name}`);
+     if (!root) {
+         return;
+     }
+ 
+-    try {
+-        [percentTemplate, decimalSeparator] = await getStrings([
+-            {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},
+-            {key: 'decsep', component: 'langconfig'},
+-        ]);
+-    } catch (e) {
++    // Listeners are attached at once; the localised strings arrive later and trigger a new calculation.
++    getStrings([
++        {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},
++        {key: 'decsep', component: 'langconfig'},
++    ]).then(([template, separator]) => {
++        percentTemplate = template;
++        decimalSeparator = separator;
++        recalculate(root);
++        return null;
++    }).catch(() => {
+         // Keep the defaults.
+-    }
++    });
+ 
+     root.addEventListener('change', (e) => {
+         if (e.target.matches(SELECTORS.WEIGHT)) {
+@@ -113,22 +117,26 @@ export const init = async(name) => {
+         }
+     });
+ 
++    // The YUI handlers are attached to the buttons themselves, so the DOM is already updated here.
+     root.addEventListener('click', (e) => {
+         if (e.target.matches('input[type=submit][id$="-duplicate"]')) {
+             copyDuplicatedWeight(root, e.target);
+             recalculate(root);
++        } else if (e.target.matches('input[type=submit][id$="-addcriterion"]')) {
++            recalculate(root);
+         }
+     });
+ 
+-    // Criteria added or deleted by the YUI editor (deletion happens after a confirmation dialog).
++    // Any other change of the criteria (e.g. deletion, which happens after a confirmation dialog).
++    // A timeout is used instead of requestAnimationFrame, which does not run in pages that are not painted.
+     let scheduled = false;
+     const observer = new MutationObserver(() => {
+         if (!scheduled) {
+             scheduled = true;
+-            window.requestAnimationFrame(() => {
++            setTimeout(() => {
+                 scheduled = false;
+                 recalculate(root);
+-            });
++            }, 0);
+         }
+     });
+     observer.observe(root, {childList: true, subtree: true});
+diff --git a/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php b/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
+index 9f76b05..db4cb82 100644
+--- a/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
++++ b/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
+@@ -72,9 +72,9 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin
+                 array('criterionid' => backup::VAR_PARENTID));
+ 
+         // IED extension: weight of each criterion (part of the rubric design, copied with or without user data).
+-        $weight = new backup_nested_element('rubric_ranges_weight', array('id'), array('weight'));
++        $weight = new backup_nested_element('rubric_ranges_weight', ['id'], ['weight']);
+         $criterion->add_child($weight);
+-        $weight->set_source_table('gradingform_rubric_ranges_w', array('criterionid' => backup::VAR_PARENTID));
++        $weight->set_source_table('gradingform_rubric_ranges_w', ['criterionid' => backup::VAR_PARENTID]);
+ 
+         // No need to annotate ids or files yet (one day when criterion definition supports
+         // Embedded files, they must be annotated here).
+@@ -121,12 +121,12 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin
+         // IED extension: validation history (instances are only backed up with user data).
+         // The persistent technical fields (usermodified, timecreated, timemodified) are regenerated on restore.
+         $validations = new backup_nested_element('rubric_ranges_validations');
+-        $validation = new backup_nested_element('rubric_ranges_validation', array('id'), array(
++        $validation = new backup_nested_element('rubric_ranges_validation', ['id'], [
+             'itemid', 'criterionid', 'teacherlevelid', 'teachergrade', 'teacherremark', 'teacherremarkformat',
+-            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated'));
++            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated']);
+         $pluginwrapper->add_child($validations);
+         $validations->add_child($validation);
+-        $validation->set_source_table('gradingform_rubric_ranges_h', array('instanceid' => backup::VAR_PARENTID));
++        $validation->set_source_table('gradingform_rubric_ranges_h', ['instanceid' => backup::VAR_PARENTID]);
+         $validation->annotate_ids('user', 'teacherid');
+         $validation->annotate_ids('user', 'validatorid');
+ 
+diff --git a/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php b/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
+index a4d6d53..216c2cb 100644
+--- a/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
++++ b/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
+@@ -50,8 +50,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+             $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_levels/rubric_ranges_level'));
+ 
+         // IED extension: criteria weights.
+-        $paths[] = new restore_path_element('gradingform_rubric_ranges_weight',
+-            $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_weight'));
++        $paths[] = new restore_path_element(
++            'gradingform_rubric_ranges_weight',
++            $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_weight')
++        );
+ 
+         return $paths;
+     }
+@@ -69,8 +71,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+             $this->get_pathfor('/rubric_ranges_fillings/rubric_ranges_filling'));
+ 
+         // IED extension: validation history.
+-        $paths[] = new restore_path_element('gradingform_rubric_ranges_validation',
+-            $this->get_pathfor('/rubric_ranges_validations/rubric_ranges_validation'));
++        $paths[] = new restore_path_element(
++            'gradingform_rubric_ranges_validation',
++            $this->get_pathfor('/rubric_ranges_validations/rubric_ranges_validation')
++        );
+ 
+         return $paths;
+     }
+@@ -160,8 +164,8 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+             return;
+         }
+         $history = \gradingform_rubric_ranges\persistent\validation_history::class;
+-        if ($history::record_exists_select('itemid = :itemid AND criterionid = :criterionid',
+-                ['itemid' => $itemid, 'criterionid' => $criterionid])) {
++        $params = ['itemid' => $itemid, 'criterionid' => $criterionid];
++        if ($history::record_exists_select('itemid = :itemid AND criterionid = :criterionid', $params)) {
+             // Already restored (e.g. restoring twice into the same course).
+             return;
+         }
+diff --git a/classes/event/grade_validated.php b/classes/event/grade_validated.php
+index 48461c1..96181b6 100644
+--- a/classes/event/grade_validated.php
++++ b/classes/event/grade_validated.php
+@@ -34,7 +34,6 @@ namespace gradingform_rubric_ranges\event;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ class grade_validated extends \core\event\base {
+-
+     /**
+      * Init method.
+      */
+diff --git a/classes/form/settings_form.php b/classes/form/settings_form.php
+index 17bb3f5..69b021e 100644
+--- a/classes/form/settings_form.php
++++ b/classes/form/settings_form.php
+@@ -30,7 +30,6 @@ use gradingform_rubric_ranges\local\features;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ class settings_form extends \moodleform {
+-
+     /**
+      * Form definition.
+      */
+diff --git a/classes/local/features.php b/classes/local/features.php
+index c7358a3..d507509 100644
+--- a/classes/local/features.php
++++ b/classes/local/features.php
+@@ -27,7 +27,6 @@ namespace gradingform_rubric_ranges\local;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ final class features {
+-
+     /** @var string Plugin component used to store the flags. */
+     const COMPONENT = 'gradingform_rubric_ranges';
+ 
+diff --git a/classes/local/grade_calculator.php b/classes/local/grade_calculator.php
+index baf7759..a858f0c 100644
+--- a/classes/local/grade_calculator.php
++++ b/classes/local/grade_calculator.php
+@@ -31,7 +31,6 @@ namespace gradingform_rubric_ranges\local;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ final class grade_calculator {
+-
+     /**
+      * Calculates the grade of a filled rubric.
+      *
+@@ -44,8 +43,15 @@ final class grade_calculator {
+      * @param bool $numeric whether numeric grading is enabled
+      * @return float|int the grade, -1 when it cannot be calculated
+      */
+-    public static function calculate(array $criteria, array $filling, array $options, array $graderange,
+-            bool $allowdecimals, bool $weighting, bool $numeric) {
++    public static function calculate(
++        array $criteria,
++        array $filling,
++        array $options,
++        array $graderange,
++        bool $allowdecimals,
++        bool $weighting,
++        bool $numeric
++    ) {
+         if (empty($graderange) || empty($criteria)) {
+             return -1;
+         }
+diff --git a/classes/local/range_resolver.php b/classes/local/range_resolver.php
+index fdafa1c..c688fac 100644
+--- a/classes/local/range_resolver.php
++++ b/classes/local/range_resolver.php
+@@ -30,7 +30,6 @@ namespace gradingform_rubric_ranges\local;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ final class range_resolver {
+-
+     /**
+      * Returns the range of every level of a criterion.
+      *
+@@ -123,8 +122,10 @@ final class range_resolver {
+             return null;
+         }
+         $grade = $filling['grade'] ?? null;
+-        if ($grade !== null && $grade !== '' && is_numeric($grade)
+-                && self::level_for_grade($criterion, (int) $grade) === (int) $levelid) {
++        if (
++            $grade !== null && $grade !== '' && is_numeric($grade)
++                && self::level_for_grade($criterion, (int) $grade) === (int) $levelid
++        ) {
+             return (float) $grade;
+         }
+         return (float) $criterion['levels'][$levelid]['score'];
+diff --git a/classes/local/validation_manager.php b/classes/local/validation_manager.php
+index 43a1124..5686ad5 100644
+--- a/classes/local/validation_manager.php
++++ b/classes/local/validation_manager.php
+@@ -33,7 +33,6 @@ use gradingform_rubric_ranges_instance;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ final class validation_manager {
+-
+     /** @var string Capability to validate grades. */
+     const CAPABILITY = 'gradingform/rubric_ranges:validate';
+ 
+@@ -183,12 +182,16 @@ final class validation_manager {
+      * @param gradingform_rubric_ranges_instance $teacher instance graded by the teacher
+      * @param int $validatorid
+      */
+-    public static function record_validation(gradingform_rubric_ranges_instance $validated,
+-            gradingform_rubric_ranges_instance $teacher, int $validatorid): void {
++    public static function record_validation(
++        gradingform_rubric_ranges_instance $validated,
++        gradingform_rubric_ranges_instance $teacher,
++        int $validatorid
++    ): void {
+         $controller = $validated->get_controller();
+         $teacherfilling = $teacher->get_rubric_filling()['criteria'];
+         $validatedfilling = $validated->get_rubric_filling(true)['criteria'];
+         $itemid = (int) $validated->get_data('itemid');
++        $instanceid = (int) $validated->get_id();
+         $now = time();
+ 
+         $first = null;
+@@ -197,7 +200,7 @@ final class validation_manager {
+             $new = $validatedfilling[$criterionid] ?? [];
+             $record = new validation_history(0, (object) [
+                 'itemid' => $itemid,
+-                'instanceid' => $validated->get_id(),
++                'instanceid' => $instanceid,
+                 'criterionid' => $criterionid,
+                 'teacherlevelid' => self::int_or_null($original['levelid'] ?? null),
+                 'teachergrade' => self::int_or_null($original['grade'] ?? null),
+@@ -221,7 +224,7 @@ final class validation_manager {
+                 'userid' => $validatorid,
+                 'other' => [
+                     'itemid' => $itemid,
+-                    'instanceid' => $validated->get_id(),
++                    'instanceid' => $instanceid,
+                     'criteria' => count($controller->get_definition()->rubric_criteria),
+                     'teacherid' => (int) $teacher->get_data('raterid'),
+                 ],
+@@ -269,7 +272,7 @@ final class validation_manager {
+      * @return validation_history[]
+      */
+     public static function get_history_for_user(int $userid, array $criterionids): array {
+-        return array_filter(self::get_records_in('criterionid', $criterionids), function($record) use ($userid) {
++        return array_filter(self::get_records_in('criterionid', $criterionids), function ($record) use ($userid) {
+             return (int) $record->get('teacherid') === $userid || (int) $record->get('validatorid') === $userid;
+         });
+     }
+diff --git a/classes/local/weights.php b/classes/local/weights.php
+index 615cd28..5c58d93 100644
+--- a/classes/local/weights.php
++++ b/classes/local/weights.php
+@@ -30,7 +30,6 @@ use gradingform_rubric_ranges\persistent\criterion_weight;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ final class weights {
+-
+     /** @var int Minimum weight. */
+     const MIN = 1;
+ 
+diff --git a/classes/persistent/criterion_weight.php b/classes/persistent/criterion_weight.php
+index 5465586..fb29072 100644
+--- a/classes/persistent/criterion_weight.php
++++ b/classes/persistent/criterion_weight.php
+@@ -28,7 +28,6 @@ use core\persistent;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ class criterion_weight extends persistent {
+-
+     /** @var string Table name. */
+     const TABLE = 'gradingform_rubric_ranges_w';
+ 
+diff --git a/classes/persistent/validation_history.php b/classes/persistent/validation_history.php
+index f16b9bd..6e6ed7e 100644
+--- a/classes/persistent/validation_history.php
++++ b/classes/persistent/validation_history.php
+@@ -31,7 +31,6 @@ use core\persistent;
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ class validation_history extends persistent {
+-
+     /** @var string Table name. */
+     const TABLE = 'gradingform_rubric_ranges_h';
+ 
+diff --git a/classes/privacy/provider.php b/classes/privacy/provider.php
+index 69a9757..82485ae 100644
+--- a/classes/privacy/provider.php
++++ b/classes/privacy/provider.php
+@@ -139,7 +139,8 @@ class provider implements
+         }
+         writer::with_context($context)->export_data(
+             array_merge($subcontext, [get_string('privacy:validation', 'gradingform_rubric_ranges')]),
+-            (object) ['validation' => $data]);
++            (object) ['validation' => $data]
++        );
+     }
+ 
+     /**
+@@ -164,13 +165,13 @@ class provider implements
+      */
+     public static function get_contexts_for_userid(int $userid): contextlist {
+         $contextlist = new contextlist();
+-        $contextlist->add_from_sql("SELECT a.contextid
+-                                      FROM {gradingform_rubric_ranges_h} h
+-                                      JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
+-                                      JOIN {grading_definitions} d ON d.id = c.definitionid
+-                                      JOIN {grading_areas} a ON a.id = d.areaid
+-                                     WHERE h.teacherid = :teacherid OR h.validatorid = :validatorid",
+-            ['teacherid' => $userid, 'validatorid' => $userid]);
++        $sql = "SELECT a.contextid
++                  FROM {gradingform_rubric_ranges_h} h
++                  JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
++                  JOIN {grading_definitions} d ON d.id = c.definitionid
++                  JOIN {grading_areas} a ON a.id = d.areaid
++                 WHERE h.teacherid = :teacherid OR h.validatorid = :validatorid";
++        $contextlist->add_from_sql($sql, ['teacherid' => $userid, 'validatorid' => $userid]);
+         return $contextlist;
+     }
+ 
+diff --git a/lib.php b/lib.php
+index a3a9d78..31bd387 100644
+--- a/lib.php
++++ b/lib.php
+@@ -84,8 +84,11 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+             null, null, new pix_icon('icon', '', 'gradingform_rubric_ranges'));
+         // IED extension: site settings page (core does not load settings.php for gradingform plugins).
+         if (has_capability('moodle/site:config', context_system::instance())) {
+-            $node->add(get_string('settingspage', 'gradingform_rubric_ranges'),
+-                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'), settings_navigation::TYPE_CUSTOM);
++            $node->add(
++                get_string('settingspage', 'gradingform_rubric_ranges'),
++                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'),
++                settings_navigation::TYPE_CUSTOM
++            );
+         }
+     }
+ 
+@@ -226,8 +229,9 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+                     $haschanges[1] = true;
+                 }
+                 // IED extension: a weight change affects the grade, students require re-grading.
+-                if (array_key_exists('weight', $criterion)
+-                        && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight']) {
++                $weightchanged = array_key_exists('weight', $criterion)
++                    && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight'];
++                if ($weightchanged) {
+                     if ($doupdate) {
+                         weights::save($id, $criterion['weight']);
+                     }
+@@ -964,8 +968,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+                 return false;
+             }
+             // IED extension: a numeric grade is data too.
+-            if (features::numericgrading_enabled()
+-                    && trim((string) ($elementvalue['criteria'][$id]['grade'] ?? '')) !== '') {
++            $grade = trim((string) ($elementvalue['criteria'][$id]['grade'] ?? ''));
++            if (features::numericgrading_enabled() && $grade !== '') {
+                 return false;
+             }
+         }
+@@ -1095,8 +1099,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+         global $DB, $USER;
+ 
+         $state = validation_manager::get_state($this, (int) $USER->id);
+-        if (validation_manager::is_locked($state, $elementvalue) ||
+-                ($state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue))) {
++        $emptyvalidation = $state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue);
++        if (validation_manager::is_locked($state, $elementvalue) || $emptyvalidation) {
+             return validation_manager::keep_current_grade($this);
+         }
+         if ($state !== validation_manager::STATE_PENDING) {
+@@ -1125,10 +1129,15 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+             if (!$controller->is_form_available()) {
+                 return -1;
+             }
+-            return grade_calculator::calculate($controller->get_definition()->rubric_criteria, $grade,
+-                $controller->get_options(), array_keys($controller->get_grade_range()),
+-                (bool) $controller->get_allow_grade_decimals(), features::weighting_enabled(),
+-                features::numericgrading_enabled());
++            return grade_calculator::calculate(
++                $controller->get_definition()->rubric_criteria,
++                $grade,
++                $controller->get_options(),
++                array_keys($controller->get_grade_range()),
++                (bool) $controller->get_allow_grade_decimals(),
++                features::weighting_enabled(),
++                features::numericgrading_enabled()
++            );
+         }
+ 
+         if (!($scores = $this->get_controller()->get_min_max_score()) || $scores['maxscore'] <= $scores['minscore']) {
+@@ -1196,8 +1205,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+             );
+             // IED extension: numeric grade, automatic level and feedback.
+             if (features::numericgrading_enabled()) {
+-                $page->requires->js_call_amd('gradingform_rubric_ranges/numeric_grading', 'init',
+-                    [$gradingformelement->getName()]);
++                $page->requires->js_call_amd(
++                    'gradingform_rubric_ranges/numeric_grading',
++                    'init',
++                    [$gradingformelement->getName()]
++                );
+             }
+             $mode = gradingform_rubric_ranges_controller::DISPLAY_EVAL;
+         } else {
+@@ -1255,7 +1267,13 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+             }
+             $history = validation_manager::get_history((int) $this->get_data('itemid'));
+             return $html . $this->get_controller()->get_renderer($page)->display_validation_element(
+-                $state, $criteria, $options, $gradingformelement->getName(), $value, $history);
++                $state,
++                $criteria,
++                $options,
++                $gradingformelement->getName(),
++                $value,
++                $history
++            );
+         }
+         $html .= $this->get_controller()->get_renderer($page)->display_rubric(
+             $criteria, $options, $mode, $gradingformelement->getName(), $value
+diff --git a/renderer.php b/renderer.php
+index d4b0d0a..b906eed 100644
+--- a/renderer.php
++++ b/renderer.php
+@@ -941,8 +941,10 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                     'id' => '{NAME}-criteria-{CRITERION-id}-weight',
+                     'class' => 'custom-select weightselect',
+                 ]);
+-                $html = html_writer::label(get_string('weight', 'gradingform_rubric_ranges'),
+-                    '{NAME}-criteria-{CRITERION-id}-weight');
++                $html = html_writer::label(
++                    get_string('weight', 'gradingform_rubric_ranges'),
++                    '{NAME}-criteria-{CRITERION-id}-weight'
++                );
+                 $html .= $select;
+                 $html .= html_writer::span($percent === '' ? '' :
+                     get_string('weightpercent', 'gradingform_rubric_ranges', $percent), 'weightpercent');
+@@ -1024,8 +1026,11 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                 if ($grade === '') {
+                     return '';
+                 }
+-                return html_writer::div($grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'), 'inline',
+-                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']);
++                return html_writer::div(
++                    $grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'),
++                    'inline',
++                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']
++                );
+ 
+             default:
+                 return '';
+@@ -1041,8 +1046,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+      * @return string
+      */
+     protected function numeric_remarks_warning($mode, $options) {
+-        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL
+-                || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
++        $editing = $mode == gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL;
++        if (!$editing || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
+             return '';
+         }
+         return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
+@@ -1066,9 +1071,13 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
+         switch ($state) {
+             case validation_manager::STATE_VALIDATED:
+-                return $this->validation_badge($history) .
+-                    $this->display_rubric($criteria, $options, $review, $elementname . '-review',
+-                        $this->add_validation_values($values, $criteria, $history));
++                return $this->validation_badge($history) . $this->display_rubric(
++                    $criteria,
++                    $options,
++                    $review,
++                    $elementname . '-review',
++                    $this->add_validation_values($values, $criteria, $history)
++                );
+ 
+             case validation_manager::STATE_NOT_GRADED:
+                 return $this->output->notification(get_string('validationnotgraded', 'gradingform_rubric_ranges'), 'info') .
+@@ -1078,7 +1087,9 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                 $html = $this->output->notification(get_string('validationpending', 'gradingform_rubric_ranges'), 'info');
+                 $html .= html_writer::div(
+                     $this->display_rubric($criteria, $options, $review, $elementname . '-review', $values),
+-                    '', ['id' => $elementname . '-validation-review']);
++                    '',
++                    ['id' => $elementname . '-validation-review']
++                );
+                 $html .= html_writer::tag('button', get_string('validate', 'gradingform_rubric_ranges'), [
+                     'type' => 'button',
+                     'id' => $elementname . '-validate-button',
+@@ -1091,8 +1102,13 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                     'id' => $elementname . '-validate',
+                     'value' => 0,
+                 ]);
+-                $editable .= $this->display_rubric($criteria, $options, gradingform_rubric_ranges_controller::DISPLAY_EVAL,
+-                    $elementname, $values);
++                $editable .= $this->display_rubric(
++                    $criteria,
++                    $options,
++                    gradingform_rubric_ranges_controller::DISPLAY_EVAL,
++                    $elementname,
++                    $values
++                );
+                 $html .= html_writer::div($editable, '', ['id' => $elementname . '-validation-editable', 'hidden' => 'hidden']);
+                 return $html;
+ 
+@@ -1113,7 +1129,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         }
+         $record = reset($history);
+         $a = (object) [
+-            'validator' => $this->user_fullname($record->get('validatorid')),
++            'validator' => s($this->user_fullname($record->get('validatorid'))),
+             'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
+         ];
+         return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
+@@ -1156,8 +1172,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+      * @return string
+      */
+     protected function validation_template($mode, $value) {
+-        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_REVIEW || !is_array($value)
+-                || empty($value['validation'])) {
++        $review = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
++        if (!$review || !is_array($value) || empty($value['validation'])) {
+             return '';
+         }
+         $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
+@@ -1166,8 +1182,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             'teacher' => s($value['validation']['teacher']),
+         ]), 'validationoriginal');
+         if ($value['validation']['remark'] !== '') {
+-            $html .= html_writer::div(get_string('validationoriginalremark', 'gradingform_rubric_ranges',
+-                s($value['validation']['remark'])), 'validationoriginalremark');
++            $remark = get_string('validationoriginalremark', 'gradingform_rubric_ranges', s($value['validation']['remark']));
++            $html .= html_writer::div($remark, 'validationoriginalremark');
+         }
+         return html_writer::div($html, 'validation');
+     }
+diff --git a/settings_page.php b/settings_page.php
+index f24cdc5..acb9ad9 100644
+--- a/settings_page.php
++++ b/settings_page.php
+@@ -60,8 +60,12 @@ if ($data = $form->get_data()) {
+             set_config($name, $new, features::COMPONENT);
+         }
+     }
+-    redirect($url, get_string('settingssaved', 'gradingform_rubric_ranges'), null,
+-        \core\output\notification::NOTIFY_SUCCESS);
++    redirect(
++        $url,
++        get_string('settingssaved', 'gradingform_rubric_ranges'),
++        null,
++        \core\output\notification::NOTIFY_SUCCESS
++    );
+ }
+ 
+ echo $OUTPUT->header();
+diff --git a/tests/assign_gradebook_test.php b/tests/assign_gradebook_test.php
+new file mode 100644
+index 0000000..3cd76e0
+--- /dev/null
++++ b/tests/assign_gradebook_test.php
+@@ -0,0 +1,115 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once(__DIR__ . '/ied_test_helper.php');
++require_once($CFG->libdir . '/gradelib.php');
++
++use gradingform_rubric_ranges\local\validation_manager;
++
++/**
++ * End to end tests through the mod_assign grading API down to the gradebook.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges_instance::submit_and_get_grade
++ * @covers     \gradingform_rubric_ranges_instance::get_grade
++ */
++final class assign_gradebook_test extends \advanced_testcase {
++    use ied_test_helper;
++
++    /**
++     * Saves a grade as mod_assign does from the grading form.
++     *
++     * @param \assign $assign
++     * @param \stdClass $grader
++     * @param \stdClass $student
++     * @param array $advancedgrading submitted value of the grading element
++     */
++    private function save_grade(\assign $assign, \stdClass $grader, \stdClass $student, array $advancedgrading): void {
++        $this->setUser($grader);
++        $assign->save_grade($student->id, (object) [
++            'advancedgrading' => $advancedgrading,
++            'attemptnumber' => -1,
++            'sendstudentnotifications' => false,
++        ]);
++    }
++
++    /**
++     * Grade of the student in the gradebook.
++     *
++     * @param \stdClass $course
++     * @param \assign $assign
++     * @param \stdClass $student
++     * @return float|null
++     */
++    private function gradebook_grade(\stdClass $course, \assign $assign, \stdClass $student): ?float {
++        $grades = grade_get_grades($course->id, 'mod', 'assign', $assign->get_instance()->id, $student->id);
++        $grade = $grades->items[0]->grades[$student->id]->grade ?? null;
++        return $grade === null ? null : (float) $grade;
++    }
++
++    /**
++     * Weighted numeric grade from the teacher, then the validated grade, reach the gradebook.
++     */
++    public function test_weighted_validated_grade_reaches_gradebook(): void {
++        $this->resetAfterTest();
++        $this->set_flags(true, true, true);
++        [$course, , , $controller, $assign] = $this->create_assign_with_rubric(null, ['C1' => 3, 'C2' => 1]);
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $validator = $this->create_validator($course);
++        $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
++
++        $this->save_grade($assign, $teacher, $student, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'Teacher'));
++        $this->assertEqualsWithDelta(53.75, $this->gradebook_grade($course, $assign, $student), 0.001);
++
++        $this->save_grade($assign, $validator, $student, $this->filling($ids, ['C1' => 80, 'C2' => 10], 'Validator', true));
++        $this->assertEqualsWithDelta(85, $this->gradebook_grade($course, $assign, $student), 0.001);
++        $this->assertTrue(validation_manager::is_validated((int) $assign->get_user_grade($student->id, false)->id));
++
++        // A later teacher regrade is ignored and the gradebook keeps the validated grade.
++        $this->save_grade($assign, $teacher, $student, $this->filling($ids, ['C1' => 10, 'C2' => 1], 'Again'));
++        $this->assertEqualsWithDelta(85, $this->gradebook_grade($course, $assign, $student), 0.001);
++    }
++
++    /**
++     * With every feature disabled the gradebook gets the upstream grade.
++     */
++    public function test_upstream_grade_reaches_gradebook(): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, false, false);
++        [$course, , , $controller, $assign] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $definition = $controller->get_definition(true);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
++
++        $this->save_grade($assign, $teacher, $student, ['criteria' => [
++            $ids['C1'] => ['levelid' => $this->level_id($definition->rubric_criteria[$ids['C1']], 'Buen dominio conceptual'),
++                'grade' => 65, 'remark' => ''],
++            $ids['C2'] => ['levelid' => $this->level_id($definition->rubric_criteria[$ids['C2']], 'Bad'), 'remark' => ''],
++        ]]);
++        // Upstream with lockzeropoints: (65 + 5) / 110 * 100.
++        $this->assertEqualsWithDelta(70 / 110 * 100, $this->gradebook_grade($course, $assign, $student), 0.001);
++    }
++}
+diff --git a/tests/backup_restore_test.php b/tests/backup_restore_test.php
+index 6aa5149..c407f92 100644
+--- a/tests/backup_restore_test.php
++++ b/tests/backup_restore_test.php
+@@ -48,8 +48,14 @@ final class backup_restore_test extends \advanced_testcase {
+      */
+     private function backup_restore(int $courseid, bool $users): int {
+         global $CFG, $USER;
+-        $bc = new \backup_controller(\backup::TYPE_1COURSE, $courseid, \backup::FORMAT_MOODLE, \backup::INTERACTIVE_NO,
+-            \backup::MODE_GENERAL, $USER->id);
++        $bc = new \backup_controller(
++            \backup::TYPE_1COURSE,
++            $courseid,
++            \backup::FORMAT_MOODLE,
++            \backup::INTERACTIVE_NO,
++            \backup::MODE_GENERAL,
++            $USER->id
++        );
+         $bc->get_plan()->get_setting('users')->set_value($users);
+         $backupid = $bc->get_backupid();
+         $bc->execute_plan();
+@@ -57,8 +63,14 @@ final class backup_restore_test extends \advanced_testcase {
+         $file->extract_to_pathname(get_file_packer('application/vnd.moodle.backup'), $CFG->tempdir . '/backup/' . $backupid);
+         $bc->destroy();
+         $newcourseid = \restore_dbops::create_new_course('Restored', 'RST' . random_string(6), 1);
+-        $rc = new \restore_controller($backupid, $newcourseid, \backup::INTERACTIVE_NO, \backup::MODE_GENERAL, $USER->id,
+-            \backup::TARGET_NEW_COURSE);
++        $rc = new \restore_controller(
++            $backupid,
++            $newcourseid,
++            \backup::INTERACTIVE_NO,
++            \backup::MODE_GENERAL,
++            $USER->id,
++            \backup::TARGET_NEW_COURSE
++        );
+         $rc->get_plan()->get_setting('users')->set_value($users);
+         $rc->execute_precheck();
+         $rc->execute_plan();
+@@ -125,9 +137,13 @@ final class backup_restore_test extends \advanced_testcase {
+         $this->assertEquals($validator->id, $row->get('validatorid'));
+ 
+         $this->assertSame(validation_manager::STATE_VALIDATED, validation_manager::get_state(
+-            $newcontroller->get_or_create_instance(0, get_admin()->id, $newgrade1->id), (int) $validator->id));
++            $newcontroller->get_or_create_instance(0, get_admin()->id, $newgrade1->id),
++            (int) $validator->id
++        ));
+         $this->assertSame(validation_manager::STATE_PENDING, validation_manager::get_state(
+-            $newcontroller->get_or_create_instance(0, $validator->id, $newgrade2->id), (int) $validator->id));
++            $newcontroller->get_or_create_instance(0, $validator->id, $newgrade2->id),
++            (int) $validator->id
++        ));
+ 
+         // Without user data: weights yes, history no.
+         $nousersid = $this->backup_restore($course->id, false);
+diff --git a/tests/event/grade_validated_test.php b/tests/event/grade_validated_test.php
+index c5c9169..bf68a65 100644
+--- a/tests/event/grade_validated_test.php
++++ b/tests/event/grade_validated_test.php
+@@ -55,6 +55,7 @@ final class grade_validated_test extends \advanced_testcase {
+         $this->assertEquals($context->id, $event->contextid);
+         $this->assertEquals('gradingform_rubric_ranges_h', $event->objecttable);
+         $this->assertSame(900, $event->other['itemid']);
++        $this->assertIsInt($event->other['instanceid']);
+         $this->assertSame(2, $event->other['criteria']);
+         $this->assertEquals($teacher->id, $event->other['teacherid']);
+         $this->assertStringContainsString("validated the grade of the grading item with id '900'", $event->get_description());
+diff --git a/tests/ied_test_helper.php b/tests/ied_test_helper.php
+index 7253176..211c818 100644
+--- a/tests/ied_test_helper.php
++++ b/tests/ied_test_helper.php
+@@ -32,7 +32,6 @@ require_once($CFG->dirroot . '/mod/assign/locallib.php');
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ trait ied_test_helper {
+-
+     /** @var array Default rubric: C1 is ranged, C2 is not. */
+     protected static $defaultcriteria = [
+         ['name' => 'C1', 'isranged' => 1, 'levels' => ['Insuf' => 50, 'Suf' => 60, 'Buen dominio conceptual' => 70, 'Exc' => 100]],
+diff --git a/tests/local/grade_calculator_test.php b/tests/local/grade_calculator_test.php
+index 777eac2..6d07f9d 100644
+--- a/tests/local/grade_calculator_test.php
++++ b/tests/local/grade_calculator_test.php
+@@ -26,7 +26,6 @@ namespace gradingform_rubric_ranges\local;
+  * @covers     \gradingform_rubric_ranges\local\grade_calculator
+  */
+ final class grade_calculator_test extends \basic_testcase {
+-
+     /**
+      * C1: ranged, max 100, weight 3. C2: not ranged, max 10, weight 1.
+      *
+@@ -103,8 +102,15 @@ final class grade_calculator_test extends \basic_testcase {
+      * @param float $expected
+      */
+     public function test_calculate(bool $weighting, bool $numeric, int $lock, float $expected): void {
+-        $grade = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
+-            true, $weighting, $numeric);
++        $grade = grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => $lock],
++            range(0, 100),
++            true,
++            $weighting,
++            $numeric
++        );
+         $this->assertEqualsWithDelta($expected, $grade, 0.001);
+     }
+ 
+@@ -113,9 +119,19 @@ final class grade_calculator_test extends \basic_testcase {
+      */
+     public function test_all_off_is_upstream(): void {
+         foreach ([1, 0] as $lock) {
+-            $this->assertEqualsWithDelta(self::upstream(self::criteria(), self::filling(), (bool) $lock, range(0, 100)),
+-                grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
+-                    true, false, false), 0.001);
++            $this->assertEqualsWithDelta(
++                self::upstream(self::criteria(), self::filling(), (bool) $lock, range(0, 100)),
++                grade_calculator::calculate(
++                    self::criteria(),
++                    self::filling(),
++                    ['lockzeropoints' => $lock],
++                    range(0, 100),
++                    true,
++                    false,
++                    false
++                ),
++                0.001
++            );
+         }
+     }
+ 
+@@ -130,48 +146,110 @@ final class grade_calculator_test extends \basic_testcase {
+         ];
+         $filling = ['criteria' => [1 => ['levelid' => 12, 'grade' => null], 2 => ['levelid' => 22, 'grade' => null]]];
+         foreach ([1, 0] as $lock) {
+-            $this->assertEqualsWithDelta(self::upstream($same, $filling, (bool) $lock, range(0, 100)),
+-                grade_calculator::calculate($same, $filling, ['lockzeropoints' => $lock], range(0, 100), true, true, false), 0.001);
++            $this->assertEqualsWithDelta(
++                self::upstream($same, $filling, (bool) $lock, range(0, 100)),
++                grade_calculator::calculate($same, $filling, ['lockzeropoints' => $lock], range(0, 100), true, true, false),
++                0.001
++            );
+         }
+         $diffmin = $same;
+         $diffmin[2]['levels'] = [21 => $level(21, 20), 22 => $level(22, 100)];
+-        $this->assertNotEqualsWithDelta(self::upstream($diffmin, $filling, false, range(0, 100)),
+-            grade_calculator::calculate($diffmin, $filling, ['lockzeropoints' => 0], range(0, 100), true, true, false), 0.001);
++        $this->assertNotEqualsWithDelta(
++            self::upstream($diffmin, $filling, false, range(0, 100)),
++            grade_calculator::calculate($diffmin, $filling, ['lockzeropoints' => 0], range(0, 100), true, true, false),
++            0.001
++        );
+     }
+ 
+     /**
+      * Rounding and scales work as upstream.
+      */
+     public function test_rounding_and_scales(): void {
+-        $this->assertEquals(54, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
+-            range(0, 100), false, true, true));
+-        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
+-            range(1, 5), false, true, true));
+-        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0],
+-            range(1, 5), false, true, true));
++        $this->assertEquals(54, grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => 1],
++            range(0, 100),
++            false,
++            true,
++            true
++        ));
++        $this->assertEquals(3, grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => 1],
++            range(1, 5),
++            false,
++            true,
++            true
++        ));
++        $this->assertEquals(3, grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => 0],
++            range(1, 5),
++            false,
++            true,
++            true
++        ));
+     }
+ 
+     /**
+      * Criteria that cannot be normalised are left out; criteria without filling count 0.
+      */
+     public function test_excluded_and_missing_criteria(): void {
+-        $base = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0], range(0, 100),
+-            true, true, false);
++        $base = grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => 0],
++            range(0, 100),
++            true,
++            true,
++            false
++        );
+         $flat = self::criteria();
+         $flat[3] = ['isranged' => 0, 'weight' => 10, 'levels' => [31 => ['score' => 7], 32 => ['score' => 7]]];
+         $filling = self::filling();
+         $filling['criteria'][3] = ['levelid' => 31, 'grade' => null];
+-        $this->assertEqualsWithDelta($base, grade_calculator::calculate($flat, $filling, ['lockzeropoints' => 0],
+-            range(0, 100), true, true, false), 0.001);
++        $this->assertEqualsWithDelta($base, grade_calculator::calculate(
++            $flat,
++            $filling,
++            ['lockzeropoints' => 0],
++            range(0, 100),
++            true,
++            true,
++            false
++        ), 0.001);
+ 
+         $missing = ['criteria' => [1 => self::filling()['criteria'][1]]];
+-        $this->assertEqualsWithDelta(48.75, grade_calculator::calculate(self::criteria(), $missing, ['lockzeropoints' => 1],
+-            range(0, 100), true, true, true), 0.001);
++        $this->assertEqualsWithDelta(48.75, grade_calculator::calculate(
++            self::criteria(),
++            $missing,
++            ['lockzeropoints' => 1],
++            range(0, 100),
++            true,
++            true,
++            true
++        ), 0.001);
+ 
+-        $this->assertEquals(-1, grade_calculator::calculate([3 => ['isranged' => 0, 'weight' => 1,
+-            'levels' => [31 => ['score' => 0], 32 => ['score' => 0]]]], $filling, ['lockzeropoints' => 1],
+-            range(0, 100), true, true, false));
+-        $this->assertEquals(-1, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
+-            [], true, true, true));
++        $this->assertEquals(-1, grade_calculator::calculate(
++            [3 => ['isranged' => 0, 'weight' => 1,
++            'levels' => [31 => ['score' => 0], 32 => ['score' => 0]]]],
++            $filling,
++            ['lockzeropoints' => 1],
++            range(0, 100),
++            true,
++            true,
++            false
++        ));
++        $this->assertEquals(-1, grade_calculator::calculate(
++            self::criteria(),
++            self::filling(),
++            ['lockzeropoints' => 1],
++            [],
++            true,
++            true,
++            true
++        ));
+     }
+ }
+diff --git a/tests/local/range_resolver_test.php b/tests/local/range_resolver_test.php
+index ee3e8c3..0b91a1c 100644
+--- a/tests/local/range_resolver_test.php
++++ b/tests/local/range_resolver_test.php
+@@ -26,7 +26,6 @@ namespace gradingform_rubric_ranges\local;
+  * @covers     \gradingform_rubric_ranges\local\range_resolver
+  */
+ final class range_resolver_test extends \basic_testcase {
+-
+     /** @var array Criterion with levels 50, 60, 70 and 100 (ids 11 to 14). */
+     private const CRITERION = ['levels' => [
+         11 => ['score' => 50, 'definition' => 'Insuf'],
+@@ -41,8 +40,10 @@ final class range_resolver_test extends \basic_testcase {
+     public function test_ranges_for_criterion(): void {
+         $ranges = range_resolver::ranges_for_criterion(self::CRITERION);
+         $this->assertSame([11, 12, 13, 14], array_keys($ranges));
+-        $this->assertSame(['0-50', '51-60', '61-70', '71-100'],
+-            array_map(fn($r) => $r['min'] . '-' . $r['max'], array_values($ranges)));
++        $this->assertSame(
++            ['0-50', '51-60', '61-70', '71-100'],
++            array_map(fn($r) => $r['min'] . '-' . $r['max'], array_values($ranges))
++        );
+     }
+ 
+     /**
+@@ -51,8 +52,10 @@ final class range_resolver_test extends \basic_testcase {
+     public function test_ranges_descending_order(): void {
+         $criterion = self::CRITERION;
+         $criterion['levels'] = array_reverse($criterion['levels'], true);
+-        $this->assertEquals(range_resolver::ranges_for_criterion(self::CRITERION),
+-            range_resolver::ranges_for_criterion($criterion));
++        $this->assertEquals(
++            range_resolver::ranges_for_criterion(self::CRITERION),
++            range_resolver::ranges_for_criterion($criterion)
++        );
+     }
+ 
+     /**
+@@ -139,9 +142,10 @@ final class range_resolver_test extends \basic_testcase {
+     public function test_validate_filling(): void {
+         $other = ['levels' => [21 => ['score' => 5], 22 => ['score' => 10]]];
+         $criteria = [1 => self::CRITERION, 2 => $other];
+-        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['grade' => '2']]]));
+-        $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '101'], 2 => ['grade' => '2']]]));
+-        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['levelid' => 22]]]));
++        $valid = fn(array $c1, array $c2) => range_resolver::validate_filling($criteria, ['criteria' => [1 => $c1, 2 => $c2]]);
++        $this->assertTrue($valid(['grade' => '65'], ['grade' => '2']));
++        $this->assertFalse($valid(['grade' => '101'], ['grade' => '2']));
++        $this->assertTrue($valid(['grade' => '65'], ['levelid' => 22]));
+         $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => []]]));
+         $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65']]]));
+     }
+diff --git a/tests/local/validation_manager_test.php b/tests/local/validation_manager_test.php
+index bd97a93..7f2cf2b 100644
+--- a/tests/local/validation_manager_test.php
++++ b/tests/local/validation_manager_test.php
+@@ -55,8 +55,11 @@ final class validation_manager_test extends \advanced_testcase {
+         $this->set_flags(false, true, true);
+         [$this->course, , , $this->controller] = $this->create_assign_with_rubric();
+         $this->ids = $this->criterion_ids($this->controller);
+-        $this->teacher = $this->getDataGenerator()->create_and_enrol($this->course, 'editingteacher',
+-            ['firstname' => 'Tea', 'lastname' => 'Cher']);
++        $this->teacher = $this->getDataGenerator()->create_and_enrol(
++            $this->course,
++            'editingteacher',
++            ['firstname' => 'Tea', 'lastname' => 'Cher']
++        );
+         $this->validator = $this->create_validator($this->course);
+     }
+ 
+@@ -109,8 +112,10 @@ final class validation_manager_test extends \advanced_testcase {
+         $this->assertEqualsWithDelta($grade, $result, 0.001);
+         $this->assertFalse(validation_manager::is_validated(900));
+         $this->assertFalse($DB->record_exists('grading_instances', ['id' => $copy->get_id()]));
+-        $this->assertEquals($this->teacher->id,
+-            $DB->get_field_select('grading_instances', 'raterid', 'itemid = 900 AND status = 1'));
++        $this->assertEquals(
++            $this->teacher->id,
++            $DB->get_field_select('grading_instances', 'raterid', 'itemid = 900 AND status = 1')
++        );
+         $this->assertEquals(65, $this->current_filling(900)[$this->ids['C1']]['grade']);
+     }
+ 
+@@ -121,8 +126,12 @@ final class validation_manager_test extends \advanced_testcase {
+         $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T1'));
+         $this->setUser($this->validator);
+         $sink = $this->redirectEvents();
+-        $grade = $this->grade_as($this->validator, $this->controller, 900,
+-            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V1', true));
++        $grade = $this->grade_as(
++            $this->validator,
++            $this->controller,
++            900,
++            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V1', true)
++        );
+         $events = array_filter($sink->get_events(), fn($e) => $e instanceof \gradingform_rubric_ranges\event\grade_validated);
+         $sink->close();
+         $this->assertEqualsWithDelta(8700 / 110, $grade, 0.001);
+@@ -146,8 +155,10 @@ final class validation_manager_test extends \advanced_testcase {
+         $filling = $this->current_filling(900);
+         $this->assertEquals(80, $filling[$this->ids['C1']]['grade']);
+         $this->assertSame('V1', $filling[$this->ids['C1']]['remark']);
+-        $this->assertSame(validation_manager::STATE_VALIDATED,
+-            validation_manager::get_state($this->instance_for($this->teacher, 900), (int) $this->teacher->id));
++        $this->assertSame(
++            validation_manager::STATE_VALIDATED,
++            validation_manager::get_state($this->instance_for($this->teacher, 900), (int) $this->teacher->id)
++        );
+     }
+ 
+     /**
+@@ -155,13 +166,22 @@ final class validation_manager_test extends \advanced_testcase {
+      */
+     public function test_validated_is_locked(): void {
+         $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
+-        $validated = $this->grade_as($this->validator, $this->controller, 900,
+-            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true));
+-        $again = $this->grade_as($this->validator, $this->controller, 900,
+-            $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z', true));
++        $validated = $this->grade_as(
++            $this->validator,
++            $this->controller,
++            900,
++            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true)
++        );
++        $again = $this->grade_as(
++            $this->validator,
++            $this->controller,
++            900,
++            $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z', true)
++        );
+         $this->assertEqualsWithDelta($validated, $again, 0.001);
+         $this->assertCount(2, validation_manager::get_history(900));
+-        $teacher = $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z'));
++        $regrade = $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z');
++        $teacher = $this->grade_as($this->teacher, $this->controller, 900, $regrade);
+         $this->assertEqualsWithDelta($validated, $teacher, 0.001);
+         $empty = $this->grade_as($this->teacher, $this->controller, 900, ['criteria' => []]);
+         $this->assertEqualsWithDelta($validated, $empty, 0.001);
+@@ -174,8 +194,10 @@ final class validation_manager_test extends \advanced_testcase {
+     public function test_not_graded(): void {
+         global $DB;
+         $instance = $this->instance_for($this->validator, 901);
+-        $this->assertSame(validation_manager::STATE_NOT_GRADED,
+-            validation_manager::get_state($instance, (int) $this->validator->id));
++        $this->assertSame(
++            validation_manager::STATE_NOT_GRADED,
++            validation_manager::get_state($instance, (int) $this->validator->id)
++        );
+         $this->assertEquals(-1, $instance->submit_and_get_grade($this->filling($this->ids, ['C1' => 50, 'C2' => 5]), 901));
+         $this->assertFalse($DB->record_exists_select('grading_instances', 'itemid = 901 AND status = 1'));
+     }
+diff --git a/tests/local/weights_test.php b/tests/local/weights_test.php
+index 9cfe0ac..23c0dc0 100644
+--- a/tests/local/weights_test.php
++++ b/tests/local/weights_test.php
+@@ -83,7 +83,7 @@ final class weights_test extends \advanced_testcase {
+     public function test_editor_prepare_data(): void {
+         $this->resetAfterTest();
+         $element = new \MoodleQuickForm_rubricrangeseditor('rubricranges');
+-        $prepare = fn($value) => (function($v) {
++        $prepare = fn($value) => (function ($v) {
+             return $this->prepare_data($v);
+         })->call($element, $value);
+         $data = $prepare(['criteria' => [5 => ['description' => 'x', 'weight' => 99, 'levels' => []]]]);
+@@ -134,8 +134,10 @@ final class weights_test extends \advanced_testcase {
+         $data->rubricranges['criteria'][$ids['C2']]['weight'] = 5;
+         $data->rubricranges['regrade'] = 1;
+         $controller->update_definition($data);
+-        $this->assertEquals(\gradingform_instance::INSTANCE_STATUS_NEEDUPDATE,
+-            $DB->get_field('grading_instances', 'status', ['id' => $instance->get_id()]));
++        $this->assertEquals(
++            \gradingform_instance::INSTANCE_STATUS_NEEDUPDATE,
++            $DB->get_field('grading_instances', 'status', ['id' => $instance->get_id()])
++        );
+     }
+ 
+     /**
+diff --git a/tests/privacy/provider_ied_test.php b/tests/privacy/provider_ied_test.php
+index 2076aa3..435f225 100644
+--- a/tests/privacy/provider_ied_test.php
++++ b/tests/privacy/provider_ied_test.php
+@@ -66,9 +66,14 @@ final class provider_ied_test extends provider_testcase {
+         foreach ([1, 2] as $n) {
+             $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
+             $itemid = (int) $assign->get_user_grade($student->id, true)->id;
+-            $this->grade_as($this->teacher, $controller, $itemid, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'Teacher feedback'));
+-            $this->grade_as($this->validator, $controller, $itemid,
+-                $this->filling($this->ids, ['C1' => 80, 'C2' => 10], 'Validator feedback', true));
++            $teachergrade = $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'Teacher feedback');
++            $this->grade_as($this->teacher, $controller, $itemid, $teachergrade);
++            $this->grade_as(
++                $this->validator,
++                $controller,
++                $itemid,
++                $this->filling($this->ids, ['C1' => 80, 'C2' => 10], 'Validator feedback', true)
++            );
+             $items[] = $itemid;
+         }
+         [$this->itemid, $this->itemid2] = $items;
+@@ -80,8 +85,10 @@ final class provider_ied_test extends provider_testcase {
+      */
+     public function test_metadata(): void {
+         $this->assertTrue((new \core_privacy\manager())->component_is_compliant('gradingform_rubric_ranges'));
+-        $tables = array_map(fn($item) => $item->get_name(),
+-            provider::get_metadata(new \core_privacy\local\metadata\collection('gradingform_rubric_ranges'))->get_collection());
++        $tables = array_map(
++            fn($item) => $item->get_name(),
++            provider::get_metadata(new \core_privacy\local\metadata\collection('gradingform_rubric_ranges'))->get_collection()
++        );
+         $this->assertContains('gradingform_rubric_ranges_h', $tables);
+         $this->assertContains('gradingform_rubric_ranges_w', $tables);
+     }
+@@ -120,8 +127,10 @@ final class provider_ied_test extends provider_testcase {
+         }
+         $userlist = new \core_privacy\local\request\userlist($this->context, 'gradingform_rubric_ranges');
+         provider::get_users_in_context($userlist);
+-        $this->assertEqualsCanonicalizing([(int) $this->teacher->id, (int) $this->validator->id],
+-            array_map('intval', $userlist->get_userids()));
++        $this->assertEqualsCanonicalizing(
++            [(int) $this->teacher->id, (int) $this->validator->id],
++            array_map('intval', $userlist->get_userids())
++        );
+     }
+ 
+     /**
+@@ -148,7 +157,8 @@ final class provider_ied_test extends provider_testcase {
+      * Deleting staff data anonymises them and the grade stays validated.
+      */
+     public function test_delete_staff(): void {
+-        provider::delete_data_for_user(new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]));
++        $contextlist = new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]);
++        provider::delete_data_for_user($contextlist);
+         $row = validation_manager::get_history($this->itemid)[$this->ids['C1']];
+         $this->assertSame(0, $row->get('validatorid'));
+         $this->assertEquals($this->teacher->id, $row->get('teacherid'));
+@@ -173,8 +183,11 @@ final class provider_ied_test extends provider_testcase {
+         global $DB;
+         \core_grading\privacy\provider::delete_instance_data($this->context, $this->itemid);
+         $this->assertFalse(validation_manager::is_validated($this->itemid));
+-        $this->assertSame(0, $DB->count_records_select('gradingform_rubric_ranges_f',
+-            'instanceid IN (SELECT id FROM {grading_instances} WHERE itemid = ?)', [$this->itemid]));
++        $this->assertSame(0, $DB->count_records_select(
++            'gradingform_rubric_ranges_f',
++            'instanceid IN (SELECT id FROM {grading_instances} WHERE itemid = ?)',
++            [$this->itemid]
++        ));
+         $this->assertTrue(validation_manager::is_validated($this->itemid2));
+     }
+ }
+diff --git a/tests/renderer_test.php b/tests/renderer_test.php
+index 901059c..54ec2de 100644
+--- a/tests/renderer_test.php
++++ b/tests/renderer_test.php
+@@ -48,13 +48,22 @@ final class renderer_test extends \advanced_testcase {
+      * @param array $options option overrides
+      * @return string
+      */
+-    private function render(\gradingform_rubric_ranges_controller $controller, int $mode, ?array $values = null,
+-            array $options = []): string {
++    private function render(
++        \gradingform_rubric_ranges_controller $controller,
++        int $mode,
++        ?array $values = null,
++        array $options = []
++    ): string {
+         global $PAGE;
+         $PAGE->set_url('/');
+         $definition = $controller->get_definition(true);
+-        return $controller->get_renderer($PAGE)->display_rubric($definition->rubric_criteria,
+-            array_merge($controller->get_options(), $options), $mode, 'rr', $values);
++        return $controller->get_renderer($PAGE)->display_rubric(
++            $definition->rubric_criteria,
++            array_merge($controller->get_options(), $options),
++            $mode,
++            'rr',
++            $values
++        );
+     }
+ 
+     /**
+@@ -65,12 +74,16 @@ final class renderer_test extends \advanced_testcase {
+         $this->set_flags(true, false, false);
+         [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3]);
+         $ids = $this->criterion_ids($controller);
+-        $this->assertStringContainsString('name="rr[criteria][' . $ids['C1'] . '][weight]"',
+-            $this->render($controller, controller::DISPLAY_EDIT_FULL));
++        $this->assertStringContainsString(
++            'name="rr[criteria][' . $ids['C1'] . '][weight]"',
++            $this->render($controller, controller::DISPLAY_EDIT_FULL)
++        );
+         $this->assertStringContainsString('Weight 3 · 75 %', $this->render($controller, controller::DISPLAY_REVIEW));
+         $this->assertStringNotContainsString('class="weight"', $this->render($controller, controller::DISPLAY_VIEW));
+-        $this->assertMatchesRegularExpression('/type="hidden" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[weight\]" value="3"/',
+-            $this->render($controller, controller::DISPLAY_EDIT_FROZEN));
++        $this->assertMatchesRegularExpression(
++            '/type="hidden" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[weight\]" value="3"/',
++            $this->render($controller, controller::DISPLAY_EDIT_FROZEN)
++        );
+         $this->set_flags(false, false, false);
+         $this->assertStringNotContainsString('weightselect', $this->render($controller, controller::DISPLAY_EDIT_FULL));
+     }
+@@ -89,14 +102,18 @@ final class renderer_test extends \advanced_testcase {
+ 
+         $eval = $this->render($controller, controller::DISPLAY_EVAL, $values);
+         $this->assertMatchesRegularExpression(
+-            '/<input type="number" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[grade\]"[^>]*max="100"[^>]*value="65"/', $eval);
++            '/<input type="number" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[grade\]"[^>]*max="100"[^>]*value="65"/',
++            $eval
++        );
+         $this->assertStringNotContainsString('<select', $eval);
+         $this->assertStringContainsString('data-rangemin="61" data-rangemax="70" data-definition="Buen dominio conceptual"', $eval);
+         $this->assertStringContainsString('0 to 5', $eval);
+         $review = $this->render($controller, controller::DISPLAY_REVIEW, $values);
+         $this->assertStringContainsString('65 pts', $review);
+-        $this->assertStringContainsString('feedback of the level will not be applied',
+-            $this->render($controller, controller::DISPLAY_EDIT_FULL, null, ['enableremarks' => 0]));
++        $this->assertStringContainsString(
++            'feedback of the level will not be applied',
++            $this->render($controller, controller::DISPLAY_EDIT_FULL, null, ['enableremarks' => 0])
++        );
+         // No PHP notice for the upstream $currentgrade when remarks are disabled.
+         $this->render($controller, controller::DISPLAY_EVAL_FROZEN, $values, ['enableremarks' => 0]);
+     }
+@@ -110,10 +127,15 @@ final class renderer_test extends \advanced_testcase {
+         $this->set_flags(false, true, true);
+         [$course, , $context, $controller] = $this->create_assign_with_rubric();
+         $ids = $this->criterion_ids($controller);
+-        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher', ['firstname' => 'Tea', 'lastname' => 'Cher']);
++        $teacher = $this->getDataGenerator()->create_and_enrol(
++            $course,
++            'editingteacher',
++            ['firstname' => 'Tea', 'lastname' => 'Cher']
++        );
+         $validator = $this->create_validator($course);
+         $DB->set_field('user', 'firstname', 'Vali', ['id' => $validator->id]);
+-        $DB->set_field('user', 'lastname', 'Dator', ['id' => $validator->id]);
++        // Markup in the name must be escaped in the validation badge.
++        $DB->set_field('user', 'lastname', 'Dator <i>x</i>', ['id' => $validator->id]);
+         foreach ([900, 903] as $itemid) {
+             $this->grade_as($teacher, $controller, $itemid, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T1'));
+         }
+@@ -121,7 +143,7 @@ final class renderer_test extends \advanced_testcase {
+ 
+         $PAGE->set_context($context);
+         $PAGE->set_url('/');
+-        $render = function(int $itemid) use ($controller, $validator) {
++        $render = function (int $itemid) use ($controller, $validator) {
+             global $PAGE;
+             $instance = $controller->get_or_create_instance(0, $validator->id, $itemid);
+             $element = new \MoodleQuickForm_grading('advancedgrading', 'Grade', ['gradinginstance' => $instance]);
+@@ -135,7 +157,8 @@ final class renderer_test extends \advanced_testcase {
+         $this->assertStringContainsString('name="advancedgrading[validate]" id="advancedgrading-validate" value="0"', $pending);
+ 
+         $validated = $render(900);
+-        $this->assertStringContainsString('Grade validated by Vali Dator', $validated);
++        $this->assertStringContainsString('Grade validated by Vali Dator &lt;i&gt;x&lt;/i&gt;', $validated);
++        $this->assertStringNotContainsString('<i>x</i>', $validated);
+         $this->assertStringContainsString('Original grade: 65 · Buen dominio conceptual · Tea Cher', $validated);
+         $this->assertStringContainsString('Original feedback: T1', $validated);
+         $this->assertStringNotContainsString('type="number"', $validated);
+diff --git a/version.php b/version.php
+index fcb9a88..f0f454f 100644
+--- a/version.php
++++ b/version.php
+@@ -27,6 +27,6 @@ defined('MOODLE_INTERNAL') || die();
+ $plugin->component = 'gradingform_rubric_ranges';
+ $plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
+ $plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
+-$plugin->requires = 2023042400;    // Requires Moodle 4.2.0 or later.
++$plugin->requires = 2024100700;    // IED fork: requires Moodle 4.5 (the only version it is tested on).
+ $plugin->maturity = MATURITY_STABLE;
+-$plugin->supported = [402, 405];
++$plugin->supported = [405, 405];
+-- 
+2.39.2.windows.1
+

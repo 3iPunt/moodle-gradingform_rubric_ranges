@@ -1,0 +1,797 @@
+From 9876f2ca8ec71b6d216980591f3a68a6ff7dbe47 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 13:03:16 +0200
+Subject: [PATCH 03/10] T2: add numeric grading with automatic range and
+ feedback
+
+- Integer grade from 0 to the maximum for every criterion. The level is
+  detected from the grade with the upstream ranges (local\range_resolver)
+  and the server always recalculates it.
+- The level definition is proposed as the criterion remark (AMD
+  numeric_grading, the upstream YUI module is untouched); a remark edited
+  by the grader is never overwritten. The rubric editor warns when
+  remarks are disabled.
+- Grade calculation uses 0 as the minimum of each criterion; fillings
+  saved before enabling the feature keep their level score.
+- Level cells carry data-range* attributes so the JS no longer parses the
+  translatable "x to y" label.
+- With every feature disabled the rendered HTML is identical to upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                            |  17 ++
+ amd/build/numeric_grading.min.js      |  15 ++
+ amd/build/numeric_grading.min.js.map  |   1 +
+ amd/src/numeric_grading.js            | 167 +++++++++++++++++++
+ classes/local/range_resolver.php      | 220 ++++++++++++++++++++++++++
+ lang/en/gradingform_rubric_ranges.php |   2 +
+ lib.php                               |  33 +++-
+ renderer.php                          | 108 ++++++++++++-
+ styles.css                            |   6 +
+ 9 files changed, 564 insertions(+), 5 deletions(-)
+ create mode 100644 amd/build/numeric_grading.min.js
+ create mode 100644 amd/build/numeric_grading.min.js.map
+ create mode 100644 amd/src/numeric_grading.js
+ create mode 100644 classes/local/range_resolver.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index 401c1de..e8ee4d8 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -27,6 +27,7 @@ One commit per task, applied in order:
+ |---|---|
+ | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
+ | `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
++| `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -89,10 +90,26 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+   applies to grades saved afterwards.
+ - Weights are only shown to graders and rubric managers, never to students.
+ 
++## Notes on numeric grading
++
++- Every criterion gets an integer grade from 0 to its maximum. Ranges are the upstream ones: the lowest
++  level goes from 0 to its score and every other level from the previous score + 1 to its own score.
++- The server always decides the level from the grade (the JS only gives instant feedback).
++- The definition of the level is proposed as the criterion remark; a remark edited by the grader is never
++  overwritten. This needs "Allow grader to add text remarks for each criterion": the rubric editor warns
++  when it is disabled.
++- With numeric grading the minimum score of each criterion is 0 for the grade calculation.
++- Fillings saved before enabling it keep their level score when the stored grade does not match the level.
++- Not supported in the grader side panel (out of scope); criteria submitted without grade are handled as upstream.
++- Known upstream limitation kept as is: in `DISPLAY_EVAL_FROZEN` the points cell is not rendered, so only the
++  hidden level travels (the stored grade is kept).
++
+ ## Upstream fixes included
+ 
+ - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+   marked for regrade. Same field name fix in `edit.php` for the `lockzeropoints` warning.
++- With numeric grading enabled, the PHP warning for the undefined `$currentgrade` in `criterion_template()`
++  (remarks disabled, `DISPLAY_EVAL_FROZEN`) no longer happens.
+ 
+ ## Data access
+ 
+diff --git a/amd/build/numeric_grading.min.js b/amd/build/numeric_grading.min.js
+new file mode 100644
+index 0000000..04d7b1f
+--- /dev/null
++++ b/amd/build/numeric_grading.min.js
+@@ -0,0 +1,15 @@
++define("gradingform_rubric_ranges/numeric_grading",["exports"],(function(_exports){Object.defineProperty(_exports,"__esModule",{value:!0}),_exports.init=void 0;
++/**
++   * IED extension: numeric grade per criterion with automatic level and feedback.
++   *
++   * Works next to the upstream YUI module (js/rubric_ranges.js) without modifying it. The YUI level
++   * click handler is attached to each level cell, so it runs before the delegated handlers below.
++   * The server always recalculates the level from the grade, this module only gives instant feedback.
++   *
++   * @module     gradingform_rubric_ranges/numeric_grading
++   * @copyright  2026 Tresipunt
++   * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++   */
++const SELECTORS_CRITERION="tr.criterion",SELECTORS_LEVEL="td.level",SELECTORS_GRADE="input.gradeinput",SELECTORS_REMARK=".remark textarea",SELECTORS_RADIO="input[type=radio]",applyFeedback=(criterion,level)=>{const remark=criterion.querySelector(SELECTORS_REMARK);remark&&level&&void 0!==level.dataset.definition&&(""!==remark.value&&remark.value!==remark.dataset.autofeedback||(remark.value=level.dataset.definition,remark.dataset.autofeedback=level.dataset.definition))},markLevel=(criterion,selected)=>{criterion.querySelectorAll(SELECTORS_LEVEL).forEach((level=>{const checked=level===selected;level.classList.toggle("checked",checked),level.setAttribute("aria-checked",checked?"true":"false");const radio=level.querySelector(SELECTORS_RADIO);radio&&(radio.checked=checked)})),applyFeedback(criterion,selected)},gradeChanged=input=>{const criterion=input.closest(SELECTORS_CRITERION),value=input.value.trim();if(""===value)return input.classList.remove("is-invalid"),void markLevel(criterion,null);const grade=Number(value),level=Number.isInteger(grade)?((criterion,grade)=>Array.from(criterion.querySelectorAll(SELECTORS_LEVEL)).find((level=>grade>=Number(level.dataset.rangemin)&&grade<=Number(level.dataset.rangemax)))||null)(criterion,grade):null;input.classList.toggle("is-invalid",null===level),markLevel(criterion,level)},levelChanged=level=>{const criterion=level.closest(SELECTORS_CRITERION),input=null==criterion?void 0:criterion.querySelector(SELECTORS_GRADE);input&&(input.classList.remove("is-invalid"),level.classList.contains("checked")?(input.value=level.dataset.rangemin,applyFeedback(criterion,level)):input.value="")};_exports.init=name=>{const root=document.getElementById("rubric-".concat(name));root&&(root.querySelectorAll(SELECTORS_CRITERION).forEach((criterion=>{const remark=criterion.querySelector(SELECTORS_REMARK),checked=Array.from(criterion.querySelectorAll(SELECTORS_LEVEL)).find((level=>level.querySelector("".concat(SELECTORS_RADIO,":checked"))));remark&&checked&&remark.value===checked.dataset.definition&&(remark.dataset.autofeedback=remark.value)})),root.addEventListener("input",(e=>{e.target.matches(SELECTORS_GRADE)&&gradeChanged(e.target)})),root.addEventListener("click",(e=>{const level=e.target.closest(SELECTORS_LEVEL);level&&root.contains(level)&&levelChanged(level)})),root.addEventListener("keyup",(e=>{if("Enter"!==e.key&&" "!==e.key)return;const level=e.target.closest(SELECTORS_LEVEL);level&&root.contains(level)&&levelChanged(level)})))}}));
++
++//# sourceMappingURL=numeric_grading.min.js.map
+\ No newline at end of file
+diff --git a/amd/build/numeric_grading.min.js.map b/amd/build/numeric_grading.min.js.map
+new file mode 100644
+index 0000000..e00943b
+--- /dev/null
++++ b/amd/build/numeric_grading.min.js.map
+@@ -0,0 +1 @@
++{"version":3,"file":"numeric_grading.min.js","sources":["../src/numeric_grading.js"],"sourcesContent":["// This file is part of Moodle - http://moodle.org/\n//\n// Moodle is free software: you can redistribute it and/or modify\n// it under the terms of the GNU General Public License as published by\n// the Free Software Foundation, either version 3 of the License, or\n// (at your option) any later version.\n//\n// Moodle is distributed in the hope that it will be useful,\n// but WITHOUT ANY WARRANTY; without even the implied warranty of\n// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n// GNU General Public License for more details.\n//\n// You should have received a copy of the GNU General Public License\n// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.\n\n/**\n * IED extension: numeric grade per criterion with automatic level and feedback.\n *\n * Works next to the upstream YUI module (js/rubric_ranges.js) without modifying it. The YUI level\n * click handler is attached to each level cell, so it runs before the delegated handlers below.\n * The server always recalculates the level from the grade, this module only gives instant feedback.\n *\n * @module     gradingform_rubric_ranges/numeric_grading\n * @copyright  2026 Tresipunt\n * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later\n */\n\nconst SELECTORS = {\n    CRITERION: 'tr.criterion',\n    LEVEL: 'td.level',\n    GRADE: 'input.gradeinput',\n    REMARK: '.remark textarea',\n    RADIO: 'input[type=radio]',\n};\n\n/**\n * Returns the level cell whose range contains the grade.\n *\n * @param {HTMLElement} criterion\n * @param {Number} grade\n * @returns {HTMLElement|null}\n */\nconst findLevel = (criterion, grade) => {\n    return Array.from(criterion.querySelectorAll(SELECTORS.LEVEL)).find((level) => {\n        return grade >= Number(level.dataset.rangemin) && grade <= Number(level.dataset.rangemax);\n    }) || null;\n};\n\n/**\n * Writes the definition of the level as feedback, unless the grader has edited the feedback.\n *\n * @param {HTMLElement} criterion\n * @param {HTMLElement|null} level\n */\nconst applyFeedback = (criterion, level) => {\n    const remark = criterion.querySelector(SELECTORS.REMARK);\n    if (!remark || !level || level.dataset.definition === undefined) {\n        return;\n    }\n    if (remark.value === '' || remark.value === remark.dataset.autofeedback) {\n        remark.value = level.dataset.definition;\n        remark.dataset.autofeedback = level.dataset.definition;\n    }\n};\n\n/**\n * Marks a level of a criterion as selected (or none), as the upstream YUI module does on click.\n *\n * @param {HTMLElement} criterion\n * @param {HTMLElement|null} selected\n */\nconst markLevel = (criterion, selected) => {\n    criterion.querySelectorAll(SELECTORS.LEVEL).forEach((level) => {\n        const checked = level === selected;\n        level.classList.toggle('checked', checked);\n        level.setAttribute('aria-checked', checked ? 'true' : 'false');\n        const radio = level.querySelector(SELECTORS.RADIO);\n        if (radio) {\n            radio.checked = checked;\n        }\n    });\n    applyFeedback(criterion, selected);\n};\n\n/**\n * Handles a grade typed by the grader.\n *\n * @param {HTMLInputElement} input\n */\nconst gradeChanged = (input) => {\n    const criterion = input.closest(SELECTORS.CRITERION);\n    const value = input.value.trim();\n    if (value === '') {\n        input.classList.remove('is-invalid');\n        markLevel(criterion, null);\n        return;\n    }\n    const grade = Number(value);\n    const level = Number.isInteger(grade) ? findLevel(criterion, grade) : null;\n    input.classList.toggle('is-invalid', level === null);\n    markLevel(criterion, level);\n};\n\n/**\n * Handles a level selected or unselected by the grader (after the YUI handler).\n *\n * @param {HTMLElement} level\n */\nconst levelChanged = (level) => {\n    const criterion = level.closest(SELECTORS.CRITERION);\n    const input = criterion?.querySelector(SELECTORS.GRADE);\n    if (!input) {\n        return;\n    }\n    input.classList.remove('is-invalid');\n    if (level.classList.contains('checked')) {\n        input.value = level.dataset.rangemin;\n        applyFeedback(criterion, level);\n    } else {\n        input.value = '';\n    }\n};\n\n/**\n * Initialises the numeric grading of a rubric.\n *\n * @param {String} name the grading element name\n */\nexport const init = (name) => {\n    const root = document.getElementById(`rubric-${name}`);\n    if (!root) {\n        return;\n    }\n\n    // A remark equal to the definition of the selected level is considered automatic feedback.\n    root.querySelectorAll(SELECTORS.CRITERION).forEach((criterion) => {\n        const remark = criterion.querySelector(SELECTORS.REMARK);\n        const checked = Array.from(criterion.querySelectorAll(SELECTORS.LEVEL))\n            .find((level) => level.querySelector(`${SELECTORS.RADIO}:checked`));\n        if (remark && checked && remark.value === checked.dataset.definition) {\n            remark.dataset.autofeedback = remark.value;\n        }\n    });\n\n    root.addEventListener('input', (e) => {\n        if (e.target.matches(SELECTORS.GRADE)) {\n            gradeChanged(e.target);\n        }\n    });\n\n    root.addEventListener('click', (e) => {\n        const level = e.target.closest(SELECTORS.LEVEL);\n        if (level && root.contains(level)) {\n            levelChanged(level);\n        }\n    });\n\n    root.addEventListener('keyup', (e) => {\n        if (e.key !== 'Enter' && e.key !== ' ') {\n            return;\n        }\n        const level = e.target.closest(SELECTORS.LEVEL);\n        if (level && root.contains(level)) {\n            levelChanged(level);\n        }\n    });\n};\n"],"names":["SELECTORS","applyFeedback","criterion","level","remark","querySelector","undefined","dataset","definition","value","autofeedback","markLevel","selected","querySelectorAll","forEach","checked","classList","toggle","setAttribute","radio","gradeChanged","input","closest","trim","remove","grade","Number","isInteger","Array","from","find","rangemin","rangemax","findLevel","levelChanged","contains","name","root","document","getElementById","addEventListener","e","target","matches","key"],"mappings":";;;;;;;;;;;;MA2BMA,oBACS,eADTA,gBAEK,WAFLA,gBAGK,mBAHLA,iBAIM,mBAJNA,gBAKK,oBAsBLC,cAAgB,CAACC,UAAWC,eACxBC,OAASF,UAAUG,cAAcL,kBAClCI,QAAWD,YAAsCG,IAA7BH,MAAMI,QAAQC,aAGlB,KAAjBJ,OAAOK,OAAgBL,OAAOK,QAAUL,OAAOG,QAAQG,eACvDN,OAAOK,MAAQN,MAAMI,QAAQC,WAC7BJ,OAAOG,QAAQG,aAAeP,MAAMI,QAAQC,cAU9CG,UAAY,CAACT,UAAWU,YAC1BV,UAAUW,iBAAiBb,iBAAiBc,SAASX,cAC3CY,QAAUZ,QAAUS,SAC1BT,MAAMa,UAAUC,OAAO,UAAWF,SAClCZ,MAAMe,aAAa,eAAgBH,QAAU,OAAS,eAChDI,MAAQhB,MAAME,cAAcL,iBAC9BmB,QACAA,MAAMJ,QAAUA,YAGxBd,cAAcC,UAAWU,WAQvBQ,aAAgBC,cACZnB,UAAYmB,MAAMC,QAAQtB,qBAC1BS,MAAQY,MAAMZ,MAAMc,UACZ,KAAVd,aACAY,MAAML,UAAUQ,OAAO,mBACvBb,UAAUT,UAAW,YAGnBuB,MAAQC,OAAOjB,OACfN,MAAQuB,OAAOC,UAAUF,OAxDjB,EAACvB,UAAWuB,QACnBG,MAAMC,KAAK3B,UAAUW,iBAAiBb,kBAAkB8B,MAAM3B,OAC1DsB,OAASC,OAAOvB,MAAMI,QAAQwB,WAAaN,OAASC,OAAOvB,MAAMI,QAAQyB,aAC9E,KAqDkCC,CAAU/B,UAAWuB,OAAS,KACtEJ,MAAML,UAAUC,OAAO,aAAwB,OAAVd,OACrCQ,UAAUT,UAAWC,QAQnB+B,aAAgB/B,cACZD,UAAYC,MAAMmB,QAAQtB,qBAC1BqB,MAAQnB,MAAAA,iBAAAA,UAAWG,cAAcL,iBAClCqB,QAGLA,MAAML,UAAUQ,OAAO,cACnBrB,MAAMa,UAAUmB,SAAS,YACzBd,MAAMZ,MAAQN,MAAMI,QAAQwB,SAC5B9B,cAAcC,UAAWC,QAEzBkB,MAAMZ,MAAQ,mBASD2B,aACXC,KAAOC,SAASC,gCAAyBH,OAC1CC,OAKLA,KAAKxB,iBAAiBb,qBAAqBc,SAASZ,kBAC1CE,OAASF,UAAUG,cAAcL,kBACjCe,QAAUa,MAAMC,KAAK3B,UAAUW,iBAAiBb,kBACjD8B,MAAM3B,OAAUA,MAAME,wBAAiBL,+BACxCI,QAAUW,SAAWX,OAAOK,QAAUM,QAAQR,QAAQC,aACtDJ,OAAOG,QAAQG,aAAeN,OAAOK,UAI7C4B,KAAKG,iBAAiB,SAAUC,IACxBA,EAAEC,OAAOC,QAAQ3C,kBACjBoB,aAAaqB,EAAEC,WAIvBL,KAAKG,iBAAiB,SAAUC,UACtBtC,MAAQsC,EAAEC,OAAOpB,QAAQtB,iBAC3BG,OAASkC,KAAKF,SAAShC,QACvB+B,aAAa/B,UAIrBkC,KAAKG,iBAAiB,SAAUC,OACd,UAAVA,EAAEG,KAA6B,MAAVH,EAAEG,iBAGrBzC,MAAQsC,EAAEC,OAAOpB,QAAQtB,iBAC3BG,OAASkC,KAAKF,SAAShC,QACvB+B,aAAa/B"}
+\ No newline at end of file
+diff --git a/amd/src/numeric_grading.js b/amd/src/numeric_grading.js
+new file mode 100644
+index 0000000..4d396c6
+--- /dev/null
++++ b/amd/src/numeric_grading.js
+@@ -0,0 +1,167 @@
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * IED extension: numeric grade per criterion with automatic level and feedback.
++ *
++ * Works next to the upstream YUI module (js/rubric_ranges.js) without modifying it. The YUI level
++ * click handler is attached to each level cell, so it runs before the delegated handlers below.
++ * The server always recalculates the level from the grade, this module only gives instant feedback.
++ *
++ * @module     gradingform_rubric_ranges/numeric_grading
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++const SELECTORS = {
++    CRITERION: 'tr.criterion',
++    LEVEL: 'td.level',
++    GRADE: 'input.gradeinput',
++    REMARK: '.remark textarea',
++    RADIO: 'input[type=radio]',
++};
++
++/**
++ * Returns the level cell whose range contains the grade.
++ *
++ * @param {HTMLElement} criterion
++ * @param {Number} grade
++ * @returns {HTMLElement|null}
++ */
++const findLevel = (criterion, grade) => {
++    return Array.from(criterion.querySelectorAll(SELECTORS.LEVEL)).find((level) => {
++        return grade >= Number(level.dataset.rangemin) && grade <= Number(level.dataset.rangemax);
++    }) || null;
++};
++
++/**
++ * Writes the definition of the level as feedback, unless the grader has edited the feedback.
++ *
++ * @param {HTMLElement} criterion
++ * @param {HTMLElement|null} level
++ */
++const applyFeedback = (criterion, level) => {
++    const remark = criterion.querySelector(SELECTORS.REMARK);
++    if (!remark || !level || level.dataset.definition === undefined) {
++        return;
++    }
++    if (remark.value === '' || remark.value === remark.dataset.autofeedback) {
++        remark.value = level.dataset.definition;
++        remark.dataset.autofeedback = level.dataset.definition;
++    }
++};
++
++/**
++ * Marks a level of a criterion as selected (or none), as the upstream YUI module does on click.
++ *
++ * @param {HTMLElement} criterion
++ * @param {HTMLElement|null} selected
++ */
++const markLevel = (criterion, selected) => {
++    criterion.querySelectorAll(SELECTORS.LEVEL).forEach((level) => {
++        const checked = level === selected;
++        level.classList.toggle('checked', checked);
++        level.setAttribute('aria-checked', checked ? 'true' : 'false');
++        const radio = level.querySelector(SELECTORS.RADIO);
++        if (radio) {
++            radio.checked = checked;
++        }
++    });
++    applyFeedback(criterion, selected);
++};
++
++/**
++ * Handles a grade typed by the grader.
++ *
++ * @param {HTMLInputElement} input
++ */
++const gradeChanged = (input) => {
++    const criterion = input.closest(SELECTORS.CRITERION);
++    const value = input.value.trim();
++    if (value === '') {
++        input.classList.remove('is-invalid');
++        markLevel(criterion, null);
++        return;
++    }
++    const grade = Number(value);
++    const level = Number.isInteger(grade) ? findLevel(criterion, grade) : null;
++    input.classList.toggle('is-invalid', level === null);
++    markLevel(criterion, level);
++};
++
++/**
++ * Handles a level selected or unselected by the grader (after the YUI handler).
++ *
++ * @param {HTMLElement} level
++ */
++const levelChanged = (level) => {
++    const criterion = level.closest(SELECTORS.CRITERION);
++    const input = criterion?.querySelector(SELECTORS.GRADE);
++    if (!input) {
++        return;
++    }
++    input.classList.remove('is-invalid');
++    if (level.classList.contains('checked')) {
++        input.value = level.dataset.rangemin;
++        applyFeedback(criterion, level);
++    } else {
++        input.value = '';
++    }
++};
++
++/**
++ * Initialises the numeric grading of a rubric.
++ *
++ * @param {String} name the grading element name
++ */
++export const init = (name) => {
++    const root = document.getElementById(`rubric-${name}`);
++    if (!root) {
++        return;
++    }
++
++    // A remark equal to the definition of the selected level is considered automatic feedback.
++    root.querySelectorAll(SELECTORS.CRITERION).forEach((criterion) => {
++        const remark = criterion.querySelector(SELECTORS.REMARK);
++        const checked = Array.from(criterion.querySelectorAll(SELECTORS.LEVEL))
++            .find((level) => level.querySelector(`${SELECTORS.RADIO}:checked`));
++        if (remark && checked && remark.value === checked.dataset.definition) {
++            remark.dataset.autofeedback = remark.value;
++        }
++    });
++
++    root.addEventListener('input', (e) => {
++        if (e.target.matches(SELECTORS.GRADE)) {
++            gradeChanged(e.target);
++        }
++    });
++
++    root.addEventListener('click', (e) => {
++        const level = e.target.closest(SELECTORS.LEVEL);
++        if (level && root.contains(level)) {
++            levelChanged(level);
++        }
++    });
++
++    root.addEventListener('keyup', (e) => {
++        if (e.key !== 'Enter' && e.key !== ' ') {
++            return;
++        }
++        const level = e.target.closest(SELECTORS.LEVEL);
++        if (level && root.contains(level)) {
++            levelChanged(level);
++        }
++    });
++};
+diff --git a/classes/local/range_resolver.php b/classes/local/range_resolver.php
+new file mode 100644
+index 0000000..fdafa1c
+--- /dev/null
++++ b/classes/local/range_resolver.php
+@@ -0,0 +1,220 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++/**
++ * Business rules of the numeric grading: ranges of each level and grade of each criterion.
++ *
++ * Uses the same ranges as upstream (renderer::display_range_score): the lowest level goes from 0 to
++ * its score and every other level from the previous score (exclusive) to its own score. Ranges are
++ * always computed on the scores sorted ascending, so they do not depend on the display order.
++ *
++ * Pure functions: criteria and fillings come from the controller and instance APIs.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class range_resolver {
++
++    /**
++     * Returns the range of every level of a criterion.
++     *
++     * 'min' is the lowest integer grade of the range and 'max' the level score. A grade g belongs to
++     * the level when min <= g <= max.
++     *
++     * @param array $criterion criterion data with 'levels' (levelid => ['score' => ...])
++     * @return array levelid => ['min' => int, 'max' => float], sorted by score ascending
++     */
++    public static function ranges_for_criterion(array $criterion): array {
++        $scores = [];
++        foreach ($criterion['levels'] ?? [] as $levelid => $level) {
++            $scores[$levelid] = (float) $level['score'];
++        }
++        asort($scores);
++
++        $ranges = [];
++        $previous = null;
++        foreach ($scores as $levelid => $score) {
++            $ranges[$levelid] = [
++                'min' => $previous === null ? 0 : (int) floor($previous) + 1,
++                'max' => $score,
++            ];
++            $previous = $score;
++        }
++        return $ranges;
++    }
++
++    /**
++     * Returns the maximum grade of a criterion.
++     *
++     * @param array $criterion
++     * @return float
++     */
++    public static function max_grade(array $criterion): float {
++        if (empty($criterion['levels'])) {
++            return (float) ($criterion['points'] ?? 0);
++        }
++        $max = 0;
++        foreach ($criterion['levels'] as $level) {
++            $max = max($max, (float) $level['score']);
++        }
++        return $max;
++    }
++
++    /**
++     * Returns the level whose range contains the grade.
++     *
++     * @param array $criterion
++     * @param int $grade
++     * @return int|null levelid, null when the grade is out of range
++     */
++    public static function level_for_grade(array $criterion, int $grade): ?int {
++        foreach (self::ranges_for_criterion($criterion) as $levelid => $range) {
++            if ($grade >= $range['min'] && $grade <= $range['max']) {
++                return (int) $levelid;
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Whether a submitted value is a valid grade: an integer from 0 to the maximum of the criterion.
++     *
++     * @param array $criterion
++     * @param mixed $value
++     * @return bool
++     */
++    public static function is_valid_grade(array $criterion, $value): bool {
++        $value = trim((string) $value);
++        if (!preg_match('/^\d+$/', $value)) {
++            return false;
++        }
++        return (int) $value <= self::max_grade($criterion) && self::level_for_grade($criterion, (int) $value) !== null;
++    }
++
++    /**
++     * Returns the grade of a filled criterion used in the calculation.
++     *
++     * The stored grade is used when it is consistent with the stored level. Otherwise (fillings saved
++     * before the numeric grading was enabled) the score of the level is used, as upstream does.
++     *
++     * @param array $criterion
++     * @param array $filling filling of the criterion with 'levelid' and 'grade'
++     * @return float|null null when no level is selected
++     */
++    public static function effective_grade(array $criterion, array $filling): ?float {
++        $levelid = $filling['levelid'] ?? null;
++        if (empty($levelid) || !isset($criterion['levels'][$levelid])) {
++            return null;
++        }
++        $grade = $filling['grade'] ?? null;
++        if ($grade !== null && $grade !== '' && is_numeric($grade)
++                && self::level_for_grade($criterion, (int) $grade) === (int) $levelid) {
++            return (float) $grade;
++        }
++        return (float) $criterion['levels'][$levelid]['score'];
++    }
++
++    /**
++     * Returns the grade to display in the grade input of a criterion.
++     *
++     * @param array $criterion
++     * @param array|null $value filling or submitted data of the criterion
++     * @return string grade, or '' when there is none
++     */
++    public static function display_grade(array $criterion, ?array $value): string {
++        if (empty($value)) {
++            return '';
++        }
++        $effective = self::effective_grade($criterion, $value);
++        if ($effective !== null) {
++            return (string) (int) $effective;
++        }
++        // Submitted data not validated yet: show what was typed.
++        return isset($value['grade']) ? trim((string) $value['grade']) : '';
++    }
++
++    /**
++     * Minimum and maximum score of a rubric with numeric grading: every criterion goes from 0 to its maximum.
++     *
++     * @param array $criteria
++     * @return array ['minscore' => 0, 'maxscore' => float]
++     */
++    public static function min_max_score(array $criteria): array {
++        $max = 0;
++        foreach ($criteria as $criterion) {
++            $max += self::max_grade($criterion);
++        }
++        return ['minscore' => 0, 'maxscore' => $max];
++    }
++
++    /**
++     * Validates a submitted rubric filling with numeric grading.
++     *
++     * Criteria submitted without grade (e.g. from the grader panel, out of scope) are validated as upstream.
++     *
++     * @param array $criteria
++     * @param array $elementvalue submitted value of the grading element
++     * @return bool
++     */
++    public static function validate_filling(array $criteria, $elementvalue): bool {
++        if (!isset($elementvalue['criteria']) || !is_array($elementvalue['criteria'])) {
++            return false;
++        }
++        foreach ($criteria as $id => $criterion) {
++            $submitted = $elementvalue['criteria'][$id] ?? null;
++            if (!is_array($submitted)) {
++                return false;
++            }
++            if (array_key_exists('grade', $submitted)) {
++                if (!self::is_valid_grade($criterion, $submitted['grade'])) {
++                    return false;
++                }
++            } else if (!isset($submitted['levelid']) || !array_key_exists($submitted['levelid'], $criterion['levels'])) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    /**
++     * Normalises a submitted filling: the server decides the level from the grade.
++     *
++     * @param array $criteria
++     * @param array $data submitted data with 'criteria'
++     * @return array
++     */
++    public static function normalise_filling(array $criteria, array $data): array {
++        foreach ($data['criteria'] ?? [] as $id => $submitted) {
++            if (!isset($criteria[$id]) || !is_array($submitted) || !array_key_exists('grade', $submitted)) {
++                continue;
++            }
++            if (trim((string) $submitted['grade']) === '') {
++                // An empty grade must not reach the integer column.
++                unset($data['criteria'][$id]['grade']);
++                continue;
++            }
++            if (self::is_valid_grade($criteria[$id], $submitted['grade'])) {
++                $grade = (int) $submitted['grade'];
++                $data['criteria'][$id]['grade'] = $grade;
++                $data['criteria'][$id]['levelid'] = self::level_for_grade($criteria[$id], $grade);
++            }
++        }
++        return $data;
++    }
++}
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index dc18211..29dcd27 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -116,6 +116,8 @@ $string['enablevalidation'] = 'Enable academic validation';
+ $string['enablevalidation_help'] = 'If enabled, users with the capability \'gradingform/rubric_ranges:validate\' can validate a grade once: the validator grade and feedback replace the teacher ones, which are kept in the validation history.';
+ $string['enableweighting'] = 'Enable criteria weighting';
+ $string['enableweighting_help'] = 'If enabled, every criterion has a weight from 1 to 10 and the final grade is the weighted average of the criteria. When all criteria have the same weight and maximum score the grade is the same as without weighting.';
++$string['gradeinput'] = 'Grade for criterion {$a}';
++$string['numericnoremarks'] = 'Numeric grading is enabled but remarks are not allowed in this rubric, so the feedback of the level will not be applied automatically. Tick "Allow grader to add text remarks for each criterion" to enable it.';
+ $string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
+ $string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
+ $string['settingspage'] = 'Ranged rubric settings';
+diff --git a/lib.php b/lib.php
+index 908de3b..3b8b93f 100644
+--- a/lib.php
++++ b/lib.php
+@@ -32,6 +32,8 @@ use core_external\external_value;
+ use core_external\external_single_structure;
+ use core_external\external_multiple_structure;
+ use core_external\external_format_value;
++use gradingform_rubric_ranges\local\features;
++use gradingform_rubric_ranges\local\range_resolver;
+ use gradingform_rubric_ranges\local\weights;
+ 
+ /** rubric: Used to compare our gradeitem_type against. */
+@@ -953,6 +955,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+                     || !empty($elementvalue['criteria'][$id]['remark'])) {
+                 return false;
+             }
++            // IED extension: a numeric grade is data too.
++            if (features::numericgrading_enabled()
++                    && trim((string) ($elementvalue['criteria'][$id]['grade'] ?? '')) !== '') {
++                return false;
++            }
+         }
+         return true;
+     }
+@@ -978,6 +985,10 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+      */
+     public function validate_grading_element($elementvalue) {
+         $criteria = $this->get_controller()->get_definition()->rubric_criteria;
++        // IED extension: numeric grading validates the grade of each criterion.
++        if (features::numericgrading_enabled()) {
++            return range_resolver::validate_filling($criteria, $elementvalue);
++        }
+         if (!isset($elementvalue['criteria'])
+             || !is_array($elementvalue['criteria'])
+             || count($elementvalue['criteria']) < count($criteria)) {
+@@ -1019,6 +1030,10 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+      */
+     public function update($data) {
+         global $DB;
++        // IED extension: with numeric grading the server decides the level from the grade.
++        if (features::numericgrading_enabled()) {
++            $data = range_resolver::normalise_filling($this->get_controller()->get_definition()->rubric_criteria, $data);
++        }
+         $currentgrade = $this->get_rubric_filling();
+         parent::update($data);
+         foreach ($data['criteria'] as $criterionid => $record) {
+@@ -1061,7 +1076,13 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+     public function get_grade() {
+         $grade = $this->get_rubric_filling();
+ 
+-        if (!($scores = $this->get_controller()->get_min_max_score()) || $scores['maxscore'] <= $scores['minscore']) {
++        // IED extension: with numeric grading every criterion goes from 0 to its maximum.
++        $numeric = features::numericgrading_enabled();
++        $scores = $this->get_controller()->get_min_max_score();
++        if ($scores && $numeric) {
++            $scores = range_resolver::min_max_score($this->get_controller()->get_definition()->rubric_criteria);
++        }
++        if (!$scores || $scores['maxscore'] <= $scores['minscore']) {
+             return -1;
+         }
+ 
+@@ -1075,6 +1096,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+ 
+         $curscore = 0;
+         foreach ($grade['criteria'] as $id => $record) {
++            if ($numeric) {
++                $curscore += range_resolver::effective_grade(
++                    $this->get_controller()->get_definition()->rubric_criteria[$id], $record) ?? 0;
++                continue;
++            }
+             $curscore += ($this->get_controller()->get_definition()->rubric_criteria[$id]['isranged'])
+                         ? $record['grade']
+                         : $this->get_controller()->get_definition()->rubric_criteria[$id]['levels'][$record['levelid']]['score'];
+@@ -1124,6 +1150,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+                 true,
+                 $module
+             );
++            // IED extension: numeric grade, automatic level and feedback.
++            if (features::numericgrading_enabled()) {
++                $page->requires->js_call_amd('gradingform_rubric_ranges/numeric_grading', 'init',
++                    [$gradingformelement->getName()]);
++            }
+             $mode = gradingform_rubric_ranges_controller::DISPLAY_EVAL;
+         } else {
+             if ($gradingformelement->_persistantFreeze) {
+diff --git a/renderer.php b/renderer.php
+index ac1f876..baf7fad 100644
+--- a/renderer.php
++++ b/renderer.php
+@@ -23,6 +23,7 @@
+  */
+ 
+ use gradingform_rubric_ranges\local\features;
++use gradingform_rubric_ranges\local\range_resolver;
+ use gradingform_rubric_ranges\local\weights;
+ 
+ /**
+@@ -259,7 +260,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             }
+         }
+ 
+-        $displaygradeinput = !$options['enableremarks'] && $mode != gradingform_rubric_ranges_controller::DISPLAY_VIEW;
++        $displaygradeinput = !$options['enableremarks'] && $mode != gradingform_rubric_ranges_controller::DISPLAY_VIEW
++            && !features::numericgrading_enabled(); // IED extension: replaced by numeric_grade_template().
+         if ($displaygradeinput) {
+             if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
+                 if ($criterion['isranged']) {
+@@ -281,10 +283,15 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             }
+         }
+ 
++        // IED extension: numeric grade for every criterion.
++        $numeric = features::numericgrading_enabled();
++        if ($numeric) {
++            $gradetemplate = $this->numeric_grade_template($mode, $criterion);
++        }
+         $pointstemplate = $gradetemplate;
+         $pointstemplate .= html_writer::start_tag('div',
+             array('class' => 'inline', 'id' => '{NAME}-criteria-{CRITERION-id}-points'));
+-        if ($criterion['isranged']) {
++        if ($criterion['isranged'] || $numeric) {
+             if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
+                 $pointstemplate .= ' / ';
+                 $pointstemplate .= isset($criterion['points']) ? $criterion['points'] : 0;
+@@ -304,7 +311,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             $criteriontemplate .= html_writer::tag('td', $pointstemplate, array('class' => 'addlevel'));
+         }
+         if ($mode == gradingform_rubric_ranges_controller::DISPLAY_VIEW
+-            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL) {
++            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL
++            || ($numeric && $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW)) {
+             $criteriontemplate .= html_writer::tag('td', $pointstemplate, array('class' => 'points'));
+         }
+         $criteriontemplate .= html_writer::end_tag('tr'); // Criterion.
+@@ -364,6 +372,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         if (isset($level['tdwidth'])) {
+             $tdattributes['width'] = round($level['tdwidth']).'%';
+         }
++        $tdattributes += $this->level_data_attributes($level); // IED extension.
+ 
+         $leveltemplate = html_writer::start_tag('div', array('class' => 'level-wrapper'));
+         if ($mode == gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL) {
+@@ -568,6 +577,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             $input = html_writer::empty_tag('input', $criteriainputparams);
+             $rubrictemplate .= html_writer::tag('div', $input, array('class' => 'addcriterion btn btn-secondary'));
+         }
++        $rubrictemplate .= $this->numeric_remarks_warning($mode, $options); // IED extension.
+         $rubrictemplate .= $this->rubric_edit_options($mode, $options);
+         $rubrictemplate .= html_writer::end_tag('div');
+ 
+@@ -743,8 +753,17 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             }
+             $index = 1;
+ 
++            // IED extension: numeric grading (ranges computed before scores are turned into "x to y" labels).
++            $numeric = features::numericgrading_enabled();
++            $levelranges = [];
++            if ($numeric) {
++                $levelranges = range_resolver::ranges_for_criterion($criterion);
++                $criterion['numericgrade'] = range_resolver::display_grade($criterion, $criterionvalue);
++                $criterion['points'] = range_resolver::max_grade($criterion);
++            }
++
+             $criterion['levels'] = $this->display_range_score($mode,
+-                $criterion['levels'], $options['sortlevelsasc'], $criterion['isranged']);
++                $criterion['levels'], $options['sortlevelsasc'], $criterion['isranged'] || $numeric);
+             foreach ($criterion['levels'] as $levelid => $level) {
+                 $level['id'] = $levelid;
+                 $level['class'] = $this->get_css_class_suffix($levelcnt++, count($criterion['levels']) - 1);
+@@ -761,6 +780,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                 }
+                 $level['tdwidth'] = 100 / count($criterion['levels']);
+                 $level['index'] = $index;
++                $level['range'] = $levelranges[$levelid] ?? null;
+                 $levelsstr .= $this->level_template($mode, $options, $elementname, $id, $level);
+                 $index++;
+             }
+@@ -940,4 +960,84 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+                 return '';
+         }
+     }
++
++    /**
++     * IED extension: data attributes of a level cell used by the numeric grading JS.
++     *
++     * They replace parsing the "x to y" label, which breaks when the string is translated.
++     *
++     * @param array $level level data, with 'range' when numeric grading is enabled
++     * @return array
++     */
++    protected function level_data_attributes($level) {
++        if (empty($level['range'])) {
++            return [];
++        }
++        return [
++            'data-rangemin' => $level['range']['min'],
++            'data-rangemax' => (string) (0 + $level['range']['max']),
++            'data-definition' => (string) $level['definition'],
++        ];
++    }
++
++    /**
++     * IED extension: returns the html of the numeric grade of a criterion.
++     *
++     * Expressions {NAME} and {CRITERION-id} are replaced by criterion_template().
++     *
++     * @param int $mode rubric display mode
++     * @param array $criterion criterion data with 'numericgrade' and 'points'
++     * @return string
++     */
++    protected function numeric_grade_template($mode, $criterion) {
++        $grade = $criterion['numericgrade'] ?? '';
++        switch ($mode) {
++            case gradingform_rubric_ranges_controller::DISPLAY_EVAL:
++                return html_writer::empty_tag('input', [
++                    'type' => 'number',
++                    'name' => '{NAME}[criteria][{CRITERION-id}][grade]',
++                    'id' => '{NAME}-criteria-{CRITERION-id}-grade',
++                    'class' => 'form-control gradeinput',
++                    'min' => 0,
++                    'max' => (string) (0 + ($criterion['points'] ?? 0)),
++                    'step' => 1,
++                    'value' => $grade,
++                    'aria-label' => get_string('gradeinput', 'gradingform_rubric_ranges', s($criterion['description'])),
++                ]);
++
++            case gradingform_rubric_ranges_controller::DISPLAY_EVAL_FROZEN:
++                return html_writer::empty_tag('input', [
++                    'type' => 'hidden',
++                    'name' => '{NAME}[criteria][{CRITERION-id}][grade]',
++                    'value' => $grade,
++                ]);
++
++            case gradingform_rubric_ranges_controller::DISPLAY_REVIEW:
++            case gradingform_rubric_ranges_controller::DISPLAY_VIEW:
++                if ($grade === '') {
++                    return '';
++                }
++                return html_writer::div($grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'), 'inline',
++                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']);
++
++            default:
++                return '';
++        }
++    }
++
++    /**
++     * IED extension: warning in the rubric editor when numeric grading is enabled but remarks are not,
++     * because the automatic feedback is written in the criterion remark.
++     *
++     * @param int $mode rubric display mode
++     * @param array $options rubric options
++     * @return string
++     */
++    protected function numeric_remarks_warning($mode, $options) {
++        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL
++                || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
++            return '';
++        }
++        return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
++    }
+ }
+diff --git a/styles.css b/styles.css
+index 235c8b9..70d3850 100644
+--- a/styles.css
++++ b/styles.css
+@@ -330,3 +330,9 @@
+     margin-left: 0.5em;
+     color: #575;
+ }
++
++/* IED extension: numeric grading. */
++.gradingform_rubric_ranges .criterion .points .gradeinput {
++    display: inline-block;
++    width: 5em;
++}
+-- 
+2.39.2.windows.1
+

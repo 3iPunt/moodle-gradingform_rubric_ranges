@@ -1,0 +1,1261 @@
+From 586288c0571f58942acc18b4a9084b950062ad02 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Thu, 15 Oct 2026 15:03:08 +0200
+Subject: [PATCH 10/10] T9: validator corrections until publication and
+ publication guard
+
+Client change request after v1.0.0 (v1.1.0):
+- Publication uses the marking workflow of mod_assign: until the grade is
+  released the student sees nothing and the gradebook is empty.
+- New state "validated, pending publication": the validator can correct
+  the validated grade as many times as needed until it is released; once
+  released nobody can change it. Each correction keeps the original
+  teacher grade, stores the latest validator grade (validated values,
+  validator and time only move when a criterion changes) and triggers
+  grade_validation_updated with the previous and new values.
+- Publication guard (observer of workflow_state_updated): a grade cannot
+  be released before it is validated, from the grading form, quick
+  grading or the bulk action; it is set back to "Ready for release",
+  removed from the gradebook, and grade_publication_blocked is triggered.
+- Without the marking workflow the v1.0.0 rules apply and the grading
+  form warns that grades reach the students as soon as they are saved.
+- Version 2024112202 (2024112200-ied2); PATCHES.md: roles, workflow
+  setup and new limitations.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                                  |  54 +++--
+ classes/event/grade_publication_blocked.php |  82 +++++++
+ classes/event/grade_validation_updated.php  | 102 ++++++++
+ classes/local/publication.php               |  97 ++++++++
+ classes/local/publication_guard.php         |  78 ++++++
+ classes/local/validation_manager.php        |  95 +++++++-
+ db/events.php                               |  33 +++
+ lang/en/gradingform_rubric_ranges.php       |   7 +
+ lib.php                                     |  32 ++-
+ renderer.php                                |  50 +++-
+ tests/ied_test_helper.php                   |   5 +-
+ tests/local/publication_test.php            | 255 ++++++++++++++++++++
+ tests/renderer_test.php                     |  40 +++
+ version.php                                 |   4 +-
+ 14 files changed, 899 insertions(+), 35 deletions(-)
+ create mode 100644 classes/event/grade_publication_blocked.php
+ create mode 100644 classes/event/grade_validation_updated.php
+ create mode 100644 classes/local/publication.php
+ create mode 100644 classes/local/publication_guard.php
+ create mode 100644 db/events.php
+ create mode 100644 tests/local/publication_test.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index 891c412..712933a 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -16,7 +16,7 @@ Every feature is **disabled by default**. With all of them disabled the plugin b
+ |---|---|
+ | Upstream branch | `MOODLE_402_STABLE` |
+ | Upstream commit | `2aece39` (release `2024112200`) |
+-| Fork version | `2024112201` / `2024112200-ied1` |
++| Fork version | `2024112202` / `2024112200-ied2` (v1.1.0; v1.0.0 was `2024112201` / `2024112200-ied1`) |
+ | Moodle | 4.5 LTS only (`requires = 2024100700`, `supported = [405, 405]`): the fork is only tested on 4.5 |
+ 
+ ## Patch series
+@@ -34,23 +34,31 @@ One commit per task, applied in order:
+ | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
+ | `0008-T7-…` | PHPUnit tests of the IED extension |
+ | `0009-T8-…` | QA hardening: Moodle 4.5 only, escaping, end to end gradebook test, coding style of the fork lines, setup guide |
++| `0010-T9-…` | v1.1.0: publication with the marking workflow of mod_assign, validator corrections until publication, publication guard |
+ 
+ ## Setting up the extension (site administrator)
+ 
+ 1. Apply the patches and run `php admin/cli/upgrade.php` (or visit *Site administration > Notifications*).
+ 2. Open `/grade/grading/form/rubric_ranges/settings_page.php` (also linked as "Ranged rubric settings" in the
+    activity navigation of a ranged rubric) and enable the features needed: weighting, numeric grading, validation.
+-3. For validation, create a validator role:
+-   - *Site administration > Users > Permissions > Define roles > Add a new role*, based on the **Teacher** (or
+-     Manager) archetype so it can grade the activity;
+-   - allow `gradingform/rubric_ranges:validate`;
+-   - assign it in the course (or category) to the validators. The validator must not be the teacher who grades:
+-     a user cannot validate their own grade, and a validator cannot give the first grade.
+-   - Site administrators are **not** validators unless they get this role.
+-4. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
++3. For validation, set up the roles (publication uses the marking workflow of mod_assign):
++   - **Teacher and subject/module coordinator** (same level, they give the same first grade): they need
++     `mod/assign:grade` but **not** `mod/assign:reviewgrades` nor `mod/assign:releasegrades`. The standard
++     *Teacher* role has both by default: prohibit them in the role used by teachers and coordinators.
++   - **Validator**: a new role based on the **Teacher** (or Manager) archetype with `mod/assign:grade`,
++     `mod/assign:reviewgrades`, `mod/assign:releasegrades` and `gradingform/rubric_ranges:validate`.
++   - Assign the roles in the course (or category). The validator must not be the teacher who grades: a user cannot
++     validate their own grade, and a validator cannot give the first grade. Site administrators are **not**
++     validators unless they get the role.
++4. In each assignment graded with a ranged rubric and validation, enable **"Use marking workflow"**. Without it
++   grades reach the students as soon as they are saved (the grading form warns) and a validated grade is locked at
++   once (there is no publication step). Optionally enable **"Hide grader identity from students"**: otherwise the
++   student sees the validator as "Graded by" (native mod_assign field).
++5. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
+    automatically (the rubric editor warns otherwise).
+-5. Quick check: grade a student with the rubric, validate the grade with the validator, and check the gradebook and
+-   the log (*Ranged rubric grade validated*).
++6. Quick check: the teacher grades and sets *Ready for review*; the validator validates (*Ready for release*),
++   corrects if needed and publishes (*Released*); the student sees only the validator grade and feedback after
++   publication. The log shows *Ranged rubric grade validated* and *Ranged rubric validated grade corrected*.
+ 
+ ## Accepted limitations
+ 
+@@ -63,6 +71,9 @@ One commit per task, applied in order:
+ | The privacy export of the grading is keyed by criterion description | Upstream export contract |
+ | Enabling or disabling weighting does not recalculate grades already in the gradebook | Only grades saved afterwards use the new setting |
+ | The grader side panel PHPUnit tests error on Moodle 4.5 | Upstream issue (MDL-76583), see Tests |
++| Publication (and its guard) only exists in assignments | Other activities have no marking workflow; validated grades are locked at once |
++| A blocked publication from the single grading form may still send the "grade updated" notification if "Notify students" was ticked | mod_assign sends it after the state change; the student sees neither the grade nor the feedback |
++| The user who releases needs `mod/assign:reviewgrades` (or `managegrades`) for the guard to remove a blocked grade from the gradebook | mod_assign only updates the gradebook for workflow states the user can set |
+ | `moodle-cs` reports errors in upstream code | Upstream predates the current standard; only the lines added by the fork are kept clean (except a few lines inside upstream constructs and the language strings kept as a block at the end of the file to reduce patch conflicts) |
+ 
+ ## Generating the patches
+@@ -157,15 +168,30 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+ 
+ ## Notes on academic validation
+ 
+-- A grade (grading item) can be validated **once**, optionally, by a user with
++- **v1.1.0, with the marking workflow of mod_assign** (recommended setup):
++  - teacher or coordinator grade (one shared grade) → *Ready for review*;
++  - the validator validates → the grade is **validated, pending publication** (*Ready for release*): the validator
++    can correct it as many times as needed; the teacher can no longer change it;
++  - the validator publishes (*Released*, one by one or in bulk): the student sees the validator grade and
++    feedback; from then on **nobody can change it**;
++  - before publication the student sees nothing and the gradebook is empty (native mod_assign behaviour);
++  - each correction keeps the original teacher grade, stores the latest validator grade, level, feedback, validator
++    and date, and triggers `grade_validation_updated` with the previous and new values;
++  - a grade **cannot be released before it is validated**, from the grading form, quick grading or the bulk action:
++    the plugin sets it back to *Ready for release* (mod_assign removes it from the gradebook), warns and triggers
++    `grade_publication_blocked`. Validating and releasing in the same save is allowed.
++- Without the marking workflow (or in other activities) the v1.0.0 rules apply: the validated grade is locked at
++  once, and the grading form warns that grades reach the students as soon as they are saved.
++- A grade (grading item) can be validated, optionally, by a user with
+   `gradingform/rubric_ranges:validate` who is not the grader of the current grade (no self validation).
+ - Site administrators are **not** validators by default: the capability is checked without "do anything",
+   so they need a role that grants it explicitly.
+ - Flow: the teacher grades; the validator opens the grading form, sees the teacher grade read only and clicks
+   "Validate"; the validator grade and feedback replace the teacher ones and the original teacher grade, level
+   and feedback are kept in `gradingform_rubric_ranges_h` with the validator and the date.
+-- A grade is validated when it has history. Then it is read only for everybody: any submission is ignored and
+-  the current grade is kept (an empty submission never wipes it).
++- A grade is validated when it has history. Then it is read only (for the validator too once published, or at once
++  without marking workflow): any submission is ignored and the current grade is kept (an empty submission never
++  wipes it).
+ - A validator cannot give the first grade: when the teacher has not graded yet, the rubric is read only.
+ - Saving without clicking "Validate" keeps the teacher grade.
+ - Graders see "Grade validated by…" and the original grade of each criterion; students do not see the validation.
+diff --git a/classes/event/grade_publication_blocked.php b/classes/event/grade_publication_blocked.php
+new file mode 100644
+index 0000000..445b62d
+--- /dev/null
++++ b/classes/event/grade_publication_blocked.php
+@@ -0,0 +1,82 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\event;
++
++/**
++ * Event triggered when the publication of a grade not validated yet is reverted.
++ *
++ * @property-read array $other {
++ *      - int itemid: grading item (assign_grades.id), 0 when the student has no grade yet
++ * }
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class grade_publication_blocked extends \core\event\base {
++    /**
++     * Init method.
++     */
++    protected function init() {
++        $this->data['crud'] = 'u';
++        $this->data['edulevel'] = self::LEVEL_TEACHING;
++    }
++
++    /**
++     * Returns localised general event name.
++     *
++     * @return string
++     */
++    public static function get_name() {
++        return get_string('eventgradepublicationblocked', 'gradingform_rubric_ranges');
++    }
++
++    /**
++     * Returns non-localised event description.
++     *
++     * @return string
++     */
++    public function get_description() {
++        return "The user with id '{$this->userid}' tried to release the grade of the user with id '{$this->relateduserid}' " .
++            "in the course module with id '{$this->contextinstanceid}' before it was validated; it was set back to " .
++            "'Ready for release'.";
++    }
++
++    /**
++     * Custom validation.
++     *
++     * @throws \coding_exception
++     */
++    protected function validate_data() {
++        parent::validate_data();
++        if (!isset($this->relateduserid)) {
++            throw new \coding_exception('The relateduserid must be set.');
++        }
++        if (!isset($this->other['itemid'])) {
++            throw new \coding_exception("The 'itemid' value must be set in other.");
++        }
++    }
++
++    /**
++     * Mapping of the other fields for backup/restore.
++     *
++     * @return array
++     */
++    public static function get_other_mapping() {
++        return ['itemid' => \core\event\base::NOT_MAPPED];
++    }
++}
+diff --git a/classes/event/grade_validation_updated.php b/classes/event/grade_validation_updated.php
+new file mode 100644
+index 0000000..0a1f91d
+--- /dev/null
++++ b/classes/event/grade_validation_updated.php
+@@ -0,0 +1,102 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\event;
++
++/**
++ * Event triggered when a validator corrects a validated grade before it is published.
++ *
++ * @property-read array $other {
++ *      - int itemid: grading item
++ *      - int instanceid: grading instance saved by the validator
++ *      - array changes: per criterion, criterionid, oldlevelid, newlevelid, oldgrade, newgrade and remarkchanged
++ * }
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class grade_validation_updated extends \core\event\base {
++    /**
++     * Init method.
++     */
++    protected function init() {
++        $this->data['crud'] = 'u';
++        $this->data['edulevel'] = self::LEVEL_TEACHING;
++        $this->data['objecttable'] = 'gradingform_rubric_ranges_h';
++    }
++
++    /**
++     * Returns localised general event name.
++     *
++     * @return string
++     */
++    public static function get_name() {
++        return get_string('eventgradevalidationupdated', 'gradingform_rubric_ranges');
++    }
++
++    /**
++     * Returns non-localised event description.
++     *
++     * @return string
++     */
++    public function get_description() {
++        $changes = [];
++        foreach ($this->other['changes'] as $change) {
++            $changes[] = "criterion '{$change['criterionid']}': grade '{$change['oldgrade']}' to '{$change['newgrade']}'" .
++                ($change['remarkchanged'] ? ', feedback changed' : '');
++        }
++        return "The user with id '{$this->userid}' corrected the validated grade of the grading item with id " .
++            "'{$this->other['itemid']}' in the course module with id '{$this->contextinstanceid}' (" .
++            implode('; ', $changes) . ").";
++    }
++
++    /**
++     * Custom validation.
++     *
++     * @throws \coding_exception
++     */
++    protected function validate_data() {
++        parent::validate_data();
++        foreach (['itemid', 'instanceid', 'changes'] as $key) {
++            if (!isset($this->other[$key])) {
++                throw new \coding_exception("The '{$key}' value must be set in other.");
++            }
++        }
++    }
++
++    /**
++     * Mapping of the object for backup/restore.
++     *
++     * @return array
++     */
++    public static function get_objectid_mapping() {
++        return ['db' => 'gradingform_rubric_ranges_h', 'restore' => \core\event\base::NOT_MAPPED];
++    }
++
++    /**
++     * Mapping of the other fields for backup/restore.
++     *
++     * @return array
++     */
++    public static function get_other_mapping() {
++        return [
++            'itemid' => \core\event\base::NOT_MAPPED,
++            'instanceid' => \core\event\base::NOT_MAPPED,
++            'changes' => \core\event\base::NOT_MAPPED,
++        ];
++    }
++}
+diff --git a/classes/local/publication.php b/classes/local/publication.php
+new file mode 100644
+index 0000000..b470ce8
+--- /dev/null
++++ b/classes/local/publication.php
+@@ -0,0 +1,97 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++use gradingform_rubric_ranges_instance;
++
++/**
++ * Publication state of a grade, read from the marking workflow of mod_assign.
++ *
++ * With the marking workflow, mod_assign keeps the grade and the feedback out of the gradebook and hidden from the
++ * student until the grade is "Released" (published). Other activities have no marking workflow.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class publication {
++    /** @var string The activity has no marking workflow: grades are visible as soon as they are saved. */
++    const NO_WORKFLOW = 'noworkflow';
++
++    /** @var string Marking workflow enabled and the grade is not released yet. */
++    const UNPUBLISHED = 'unpublished';
++
++    /** @var string Marking workflow enabled and the grade is released. */
++    const PUBLISHED = 'published';
++
++    /**
++     * Returns the publication state of the grade of a grading instance.
++     *
++     * @param gradingform_rubric_ranges_instance $instance
++     * @return string one of the class constants
++     */
++    public static function status(gradingform_rubric_ranges_instance $instance): string {
++        $controller = $instance->get_controller();
++        $assign = self::get_assign($controller->get_context(), $controller->get_component());
++        if (!$assign || empty($assign->get_instance()->markingworkflow)) {
++            return self::NO_WORKFLOW;
++        }
++        $userid = self::graded_userid((int) $instance->get_data('itemid'));
++        if (!$userid) {
++            return self::UNPUBLISHED;
++        }
++        $flags = $assign->get_user_flags($userid, false);
++        $state = $flags->workflowstate ?? '';
++        return $state === ASSIGN_MARKING_WORKFLOW_STATE_RELEASED ? self::PUBLISHED : self::UNPUBLISHED;
++    }
++
++    /**
++     * Returns the assignment of a grading area context, or null for other activities.
++     *
++     * @param \context $context
++     * @param string $component component of the grading area
++     * @return \assign|null
++     */
++    public static function get_assign(\context $context, string $component): ?\assign {
++        global $CFG;
++
++        if ($component !== 'mod_assign' || $context->contextlevel != CONTEXT_MODULE) {
++            return null;
++        }
++        require_once($CFG->dirroot . '/mod/assign/locallib.php');
++        [$course, $cm] = get_course_and_cm_from_cmid($context->instanceid, 'assign');
++        return new \assign($context, $cm, $course);
++    }
++
++    /**
++     * Returns the graded user of a mod_assign grading item.
++     *
++     * Direct query on a core table: mod_assign has no API to get a grade by its id.
++     *
++     * @param int $itemid assign_grades.id
++     * @return int|null
++     */
++    private static function graded_userid(int $itemid): ?int {
++        global $DB;
++
++        if (!$itemid) {
++            return null;
++        }
++        $userid = $DB->get_field('assign_grades', 'userid', ['id' => $itemid]);
++        return $userid ? (int) $userid : null;
++    }
++}
+diff --git a/classes/local/publication_guard.php b/classes/local/publication_guard.php
+new file mode 100644
+index 0000000..69a59ba
+--- /dev/null
++++ b/classes/local/publication_guard.php
+@@ -0,0 +1,78 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++use gradingform_rubric_ranges\event\grade_publication_blocked;
++
++/**
++ * Prevents publishing (releasing) a grade of a ranged rubric before it is validated.
++ *
++ * mod_assign triggers workflow_state_updated whenever the marking workflow state changes: from the grading form,
++ * from quick grading and from the bulk action. A grade released without validation is set back to
++ * "Ready for release", so mod_assign removes it from the gradebook.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class publication_guard {
++    /**
++     * Observer of \mod_assign\event\workflow_state_updated.
++     *
++     * @param \mod_assign\event\workflow_state_updated $event
++     */
++    public static function workflow_state_updated(\mod_assign\event\workflow_state_updated $event): void {
++        global $CFG;
++
++        if (!features::validation_enabled() || ($event->other['newstate'] ?? '') !== 'released') {
++            return;
++        }
++        require_once($CFG->dirroot . '/grade/grading/lib.php');
++        require_once($CFG->dirroot . '/mod/assign/locallib.php');
++
++        $assign = $event->get_assign();
++        $manager = get_grading_manager($assign->get_context(), 'mod_assign', 'submissions');
++        if ($manager->get_active_method() !== 'rubric_ranges') {
++            return;
++        }
++        $userid = (int) $event->relateduserid;
++        $grade = $assign->get_user_grade($userid, false);
++        if ($grade && validation_manager::is_validated((int) $grade->id)) {
++            return;
++        }
++
++        $flags = $assign->get_user_flags($userid, true);
++        $flags->workflowstate = ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE;
++        $assign->update_user_flags($flags);
++        if ($grade) {
++            // Not released any more: mod_assign removes the grade from the gradebook.
++            $assign->update_grade($grade);
++        }
++
++        $user = \core_user::get_user($userid);
++        \core\notification::error(get_string(
++            'publicationblocked',
++            'gradingform_rubric_ranges',
++            $user ? s(fullname($user)) : $userid
++        ));
++        grade_publication_blocked::create([
++            'context' => $assign->get_context(),
++            'relateduserid' => $userid,
++            'other' => ['itemid' => $grade ? (int) $grade->id : 0],
++        ])->trigger();
++    }
++}
+diff --git a/classes/local/validation_manager.php b/classes/local/validation_manager.php
+index 5686ad5..d0ff4e3 100644
+--- a/classes/local/validation_manager.php
++++ b/classes/local/validation_manager.php
+@@ -18,6 +18,7 @@ namespace gradingform_rubric_ranges\local;
+ 
+ use gradingform_instance;
+ use gradingform_rubric_ranges\event\grade_validated;
++use gradingform_rubric_ranges\event\grade_validation_updated;
+ use gradingform_rubric_ranges\persistent\validation_history;
+ use gradingform_rubric_ranges_instance;
+ 
+@@ -42,9 +43,12 @@ final class validation_manager {
+     /** @var string User without the validate capability: upstream behaviour. */
+     const STATE_NORMAL = 'normal';
+ 
+-    /** @var string The grade is validated: read only for everybody. */
++    /** @var string The grade is validated and read only (published, no marking workflow, or not a validator). */
+     const STATE_VALIDATED = 'validated';
+ 
++    /** @var string Validator and a validated grade not published yet: the validator can still correct it. */
++    const STATE_VALIDATED_EDITABLE = 'validatededitable';
++
+     /** @var string Validator and the teacher has not graded yet: read only. */
+     const STATE_NOT_GRADED = 'notgraded';
+ 
+@@ -130,7 +134,7 @@ final class validation_manager {
+         }
+         $itemid = (int) $instance->get_data('itemid');
+         if ($itemid && self::is_validated($itemid)) {
+-            return self::STATE_VALIDATED;
++            return self::can_correct($instance, $userid, $itemid) ? self::STATE_VALIDATED_EDITABLE : self::STATE_VALIDATED;
+         }
+         if (!self::has_validate_capability($instance->get_controller()->get_context(), $userid)) {
+             return self::STATE_NORMAL;
+@@ -145,6 +149,27 @@ final class validation_manager {
+         return self::STATE_PENDING;
+     }
+ 
++    /**
++     * Whether the user can still correct a validated grade: it is a validator who did not give the original grade,
++     * and the grade is not published yet (only possible with the marking workflow of mod_assign).
++     *
++     * @param gradingform_rubric_ranges_instance $instance
++     * @param int $userid
++     * @param int $itemid
++     * @return bool
++     */
++    private static function can_correct(gradingform_rubric_ranges_instance $instance, int $userid, int $itemid): bool {
++        if (!self::has_validate_capability($instance->get_controller()->get_context(), $userid)) {
++            return false;
++        }
++        $history = self::get_history($itemid);
++        $first = reset($history);
++        if ($first && (int) $first->get('teacherid') === $userid) {
++            return false;
++        }
++        return publication::status($instance) === publication::UNPUBLISHED;
++    }
++
+     /**
+      * Whether a submission must be ignored in the given state.
+      *
+@@ -232,6 +257,72 @@ final class validation_manager {
+         }
+     }
+ 
++    /**
++     * Updates the validation history after a correction of the validator (before the grade is published).
++     *
++     * The original teacher grade is kept; the validated grade, level and feedback, the validator, the time and the
++     * instance are replaced by the latest ones. An event lists the changes of each criterion.
++     *
++     * @param gradingform_rubric_ranges_instance $corrected instance saved by the validator
++     * @param array $previous filling of the instance replaced by the correction (criterionid => filling)
++     * @param int $validatorid
++     */
++    public static function update_validation(
++        gradingform_rubric_ranges_instance $corrected,
++        array $previous,
++        int $validatorid
++    ): void {
++        $controller = $corrected->get_controller();
++        $itemid = (int) $corrected->get_data('itemid');
++        $instanceid = (int) $corrected->get_id();
++        $filling = $corrected->get_rubric_filling(true)['criteria'];
++        $now = time();
++
++        $changes = [];
++        $history = self::get_history($itemid);
++        foreach ($history as $criterionid => $record) {
++            $old = $previous[$criterionid] ?? [];
++            $new = $filling[$criterionid] ?? [];
++            $change = [
++                'criterionid' => (int) $criterionid,
++                'oldlevelid' => self::int_or_null($old['levelid'] ?? null),
++                'newlevelid' => self::int_or_null($new['levelid'] ?? null),
++                'oldgrade' => self::int_or_null($old['grade'] ?? null),
++                'newgrade' => self::int_or_null($new['grade'] ?? null),
++                'remarkchanged' => (string) ($old['remark'] ?? '') !== (string) ($new['remark'] ?? ''),
++            ];
++            $changed = $change['oldlevelid'] !== $change['newlevelid'] || $change['oldgrade'] !== $change['newgrade']
++                || $change['remarkchanged'];
++            // The history always points to the current instance; the validated values, the validator and the
++            // time only move when the criterion really changed (e.g. publishing without changes keeps them).
++            $record->set('instanceid', $instanceid);
++            if ($changed) {
++                $changes[] = $change;
++                $record->set_many([
++                    'validatedlevelid' => $change['newlevelid'],
++                    'validatedgrade' => $change['newgrade'],
++                    'validatedremark' => $new['remark'] ?? null,
++                    'validatorid' => $validatorid,
++                    'timevalidated' => $now,
++                ]);
++            }
++            $record->update();
++        }
++
++        if ($changes) {
++            grade_validation_updated::create([
++                'context' => $controller->get_context(),
++                'objectid' => reset($history)->get('id'),
++                'userid' => $validatorid,
++                'other' => [
++                    'itemid' => $itemid,
++                    'instanceid' => $instanceid,
++                    'changes' => $changes,
++                ],
++            ])->trigger();
++        }
++    }
++
+     /**
+      * Deletes the validation history of the given criteria.
+      *
+diff --git a/db/events.php b/db/events.php
+new file mode 100644
+index 0000000..1ece895
+--- /dev/null
++++ b/db/events.php
+@@ -0,0 +1,33 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * Event observers of gradingform_rubric_ranges.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++defined('MOODLE_INTERNAL') || die();
++
++$observers = [
++    // IED extension: a grade cannot be published (released) before it is validated.
++    [
++        'eventname' => '\mod_assign\event\workflow_state_updated',
++        'callback' => '\gradingform_rubric_ranges\local\publication_guard::workflow_state_updated',
++    ],
++];
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index 9bcf223..3f38434 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -116,9 +116,13 @@ $string['enablevalidation'] = 'Enable academic validation';
+ $string['enablevalidation_help'] = 'If enabled, users with the capability \'gradingform/rubric_ranges:validate\' can validate a grade once: the validator grade and feedback replace the teacher ones, which are kept in the validation history.';
+ $string['enableweighting'] = 'Enable criteria weighting';
+ $string['enableweighting_help'] = 'If enabled, every criterion has a weight from 1 to 10 and the final grade is the weighted average of the criteria. When all criteria have the same weight and maximum score the grade is the same as without weighting.';
++$string['eventgradepublicationblocked'] = 'Ranged rubric grade publication blocked';
+ $string['eventgradevalidated'] = 'Ranged rubric grade validated';
++$string['eventgradevalidationupdated'] = 'Ranged rubric validated grade corrected';
+ $string['gradeinput'] = 'Grade for criterion {$a}';
++$string['noworkflowwarning'] = 'Academic validation is enabled but this activity does not use the marking workflow, so grades reach the students as soon as they are saved. Enable "Use marking workflow" in the assignment settings to keep them hidden until the validator publishes them.';
+ $string['numericnoremarks'] = 'Numeric grading is enabled but remarks are not allowed in this rubric, so the feedback of the level will not be applied automatically. Tick "Allow grader to add text remarks for each criterion" to enable it.';
++$string['publicationblocked'] = 'The grade of {$a} has not been validated yet, so it cannot be released. It has been set back to "Ready for release".';
+ $string['privacy:metadata:grade'] = 'The numeric grade given for the criterion.';
+ $string['privacy:metadata:usermodified'] = 'The user who last modified the record.';
+ $string['privacy:metadata:validation:itemid'] = 'An identifier of the graded item in the activity.';
+@@ -141,6 +145,9 @@ $string['settingspage'] = 'Ranged rubric settings';
+ $string['settingssaved'] = 'Changes saved';
+ $string['validate'] = 'Validate';
+ $string['validatedby'] = 'Grade validated by {$a->validator} on {$a->date}. It cannot be changed.';
++$string['validatededitable'] = 'Grade validated by {$a->validator} on {$a->date}. It is pending publication: you can still correct it until it is released.';
++$string['validatedpending'] = 'Grade validated by {$a->validator} on {$a->date}. It is pending publication by the validator and cannot be changed.';
++$string['validatedpublished'] = 'Grade validated by {$a->validator} on {$a->date} and released. It cannot be changed.';
+ $string['validationnojs'] = 'JavaScript is required to validate the grade.';
+ $string['validationnotgraded'] = 'The teacher has not graded yet, so there is nothing to validate.';
+ $string['validationoriginal'] = 'Original grade: {$a->grade} · {$a->level} · {$a->teacher}';
+diff --git a/lib.php b/lib.php
+index 31bd387..0a3d334 100644
+--- a/lib.php
++++ b/lib.php
+@@ -34,6 +34,7 @@ use core_external\external_multiple_structure;
+ use core_external\external_format_value;
+ use gradingform_rubric_ranges\local\features;
+ use gradingform_rubric_ranges\local\grade_calculator;
++use gradingform_rubric_ranges\local\publication;
+ use gradingform_rubric_ranges\local\range_resolver;
+ use gradingform_rubric_ranges\local\validation_manager;
+ use gradingform_rubric_ranges\local\weights;
+@@ -1099,18 +1100,25 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+         global $DB, $USER;
+ 
+         $state = validation_manager::get_state($this, (int) $USER->id);
+-        $emptyvalidation = $state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue);
++        $validating = in_array($state, [validation_manager::STATE_PENDING, validation_manager::STATE_VALIDATED_EDITABLE]);
++        $emptyvalidation = $validating && $this->is_empty_form($elementvalue);
+         if (validation_manager::is_locked($state, $elementvalue) || $emptyvalidation) {
+             return validation_manager::keep_current_grade($this);
+         }
+-        if ($state !== validation_manager::STATE_PENDING) {
++        if (!$validating) {
+             return parent::submit_and_get_grade($elementvalue, $itemid);
+         }
+ 
+-        $teacher = validation_manager::get_current_graded_instance($this);
++        $current = validation_manager::get_current_graded_instance($this);
++        $previous = $current->get_rubric_filling()['criteria'];
+         $transaction = $DB->start_delegated_transaction();
+         $grade = parent::submit_and_get_grade($elementvalue, $itemid);
+-        validation_manager::record_validation($this, $teacher, (int) $USER->id);
++        if ($state === validation_manager::STATE_PENDING) {
++            validation_manager::record_validation($this, $current, (int) $USER->id);
++        } else {
++            // Correction of a validated grade not published yet.
++            validation_manager::update_validation($this, $previous, (int) $USER->id);
++        }
+         $transaction->allow_commit();
+         return $grade;
+     }
+@@ -1260,8 +1268,17 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+         }
+         // IED extension: academic validation states replace the editable rubric.
+         $state = validation_manager::get_state($this, (int) $USER->id);
+-        $validatable = $state === validation_manager::STATE_PENDING && !$gradingformelement->_flagFrozen;
+-        if ($validatable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
++        $publication = publication::NO_WORKFLOW;
++        if ($state !== validation_manager::STATE_OFF) {
++            $publication = publication::status($this);
++            if ($publication === publication::NO_WORKFLOW) {
++                $warning = get_string('noworkflowwarning', 'gradingform_rubric_ranges');
++                $html .= $this->get_controller()->get_renderer($page)->notification($warning, 'warning');
++            }
++        }
++        $editable = !$gradingformelement->_flagFrozen
++            && in_array($state, [validation_manager::STATE_PENDING, validation_manager::STATE_VALIDATED_EDITABLE]);
++        if ($editable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
+             if ($state === validation_manager::STATE_PENDING) {
+                 $page->requires->js_call_amd('gradingform_rubric_ranges/validation', 'init', [$gradingformelement->getName()]);
+             }
+@@ -1272,7 +1289,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+                 $options,
+                 $gradingformelement->getName(),
+                 $value,
+-                $history
++                $history,
++                $publication
+             );
+         }
+         $html .= $this->get_controller()->get_renderer($page)->display_rubric(
+diff --git a/renderer.php b/renderer.php
+index b906eed..a1a1afb 100644
+--- a/renderer.php
++++ b/renderer.php
+@@ -23,6 +23,7 @@
+  */
+ 
+ use gradingform_rubric_ranges\local\features;
++use gradingform_rubric_ranges\local\publication;
+ use gradingform_rubric_ranges\local\range_resolver;
+ use gradingform_rubric_ranges\local\validation_manager;
+ use gradingform_rubric_ranges\local\weights;
+@@ -857,7 +858,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         // IED extension: graders see the validation of the grade, students do not.
+         if ($cangrade && features::validation_enabled()) {
+             $history = validation_manager::get_history((int) $instance->get_data('itemid'));
+-            $output .= $this->validation_badge($history);
++            $output .= $this->validation_badge($history, publication::status($instance));
+             $values = $this->add_validation_values($values, $criteria, $history);
+         }
+         if ($showdescription) {
+@@ -1065,13 +1066,32 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+      * @param string $elementname grading element name
+      * @param array|null $values current filling
+      * @param array $history validation history (criterionid => validation_history)
++     * @param string $publication publication state (publication::NO_WORKFLOW, UNPUBLISHED or PUBLISHED)
+      * @return string
+      */
+-    public function display_validation_element($state, $criteria, $options, $elementname, $values, $history) {
++    public function display_validation_element(
++        $state,
++        $criteria,
++        $options,
++        $elementname,
++        $values,
++        $history,
++        $publication = publication::NO_WORKFLOW
++    ) {
+         $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
+         switch ($state) {
++            case validation_manager::STATE_VALIDATED_EDITABLE:
++                // The validator can still correct the grade until it is published.
++                return $this->validation_badge($history, $publication, true) . $this->display_rubric(
++                    $criteria,
++                    $options,
++                    gradingform_rubric_ranges_controller::DISPLAY_EVAL,
++                    $elementname,
++                    $this->add_validation_values($values, $criteria, $history)
++                );
++
+             case validation_manager::STATE_VALIDATED:
+-                return $this->validation_badge($history) . $this->display_rubric(
++                return $this->validation_badge($history, $publication) . $this->display_rubric(
+                     $criteria,
+                     $options,
+                     $review,
+@@ -1118,12 +1138,14 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+     }
+ 
+     /**
+-     * IED extension: returns the badge telling who validated the grade and when.
++     * IED extension: returns the badge telling who validated the grade, when, and whether it is published.
+      *
+      * @param array $history validation history (criterionid => validation_history)
++     * @param string $publication publication state (publication::NO_WORKFLOW, UNPUBLISHED or PUBLISHED)
++     * @param bool $editable whether the current user can still correct the grade
+      * @return string
+      */
+-    protected function validation_badge($history) {
++    protected function validation_badge($history, $publication = publication::NO_WORKFLOW, $editable = false) {
+         if (empty($history)) {
+             return '';
+         }
+@@ -1132,7 +1154,17 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             'validator' => s($this->user_fullname($record->get('validatorid'))),
+             'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
+         ];
+-        return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
++        if ($editable) {
++            $key = 'validatededitable';
++        } else if ($publication === publication::UNPUBLISHED) {
++            $key = 'validatedpending';
++        } else if ($publication === publication::PUBLISHED) {
++            $key = 'validatedpublished';
++        } else {
++            $key = 'validatedby';
++        }
++        $type = $editable || $publication === publication::UNPUBLISHED ? 'info' : 'success';
++        return $this->output->notification(get_string($key, 'gradingform_rubric_ranges', $a), $type, false);
+     }
+ 
+     /**
+@@ -1172,8 +1204,10 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+      * @return string
+      */
+     protected function validation_template($mode, $value) {
+-        $review = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
+-        if (!$review || !is_array($value) || empty($value['validation'])) {
++        // Review, and evaluation while the validator corrects a validated grade.
++        $shown = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW
++            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL;
++        if (!$shown || !is_array($value) || empty($value['validation'])) {
+             return '';
+         }
+         $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
+diff --git a/tests/ied_test_helper.php b/tests/ied_test_helper.php
+index 211c818..b9e1b0b 100644
+--- a/tests/ied_test_helper.php
++++ b/tests/ied_test_helper.php
+@@ -56,14 +56,15 @@ trait ied_test_helper {
+      *
+      * @param array|null $criteria criteria for the generator, the default rubric when null
+      * @param array $weights criterion name => weight
++     * @param array $assignoptions extra settings of the assignment (e.g. markingworkflow)
+      * @return array [course, cm, context, controller, assign]
+      */
+-    protected function create_assign_with_rubric(?array $criteria = null, array $weights = []): array {
++    protected function create_assign_with_rubric(?array $criteria = null, array $weights = [], array $assignoptions = []): array {
+         // The upstream generator must run as a user.
+         $this->setAdminUser();
+         $generator = $this->getDataGenerator();
+         $course = $generator->create_course();
+-        $assignrecord = $generator->create_module('assign', ['course' => $course->id, 'grade' => 100]);
++        $assignrecord = $generator->create_module('assign', ['course' => $course->id, 'grade' => 100] + $assignoptions);
+         $cm = get_coursemodule_from_instance('assign', $assignrecord->id);
+         $context = \context_module::instance($cm->id);
+         $controller = $generator->get_plugin_generator('gradingform_rubric_ranges')
+diff --git a/tests/local/publication_test.php b/tests/local/publication_test.php
+new file mode 100644
+index 0000000..312765b
+--- /dev/null
++++ b/tests/local/publication_test.php
+@@ -0,0 +1,255 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once(__DIR__ . '/../ied_test_helper.php');
++require_once($CFG->libdir . '/gradelib.php');
++
++use gradingform_rubric_ranges\event\grade_publication_blocked;
++use gradingform_rubric_ranges\event\grade_validation_updated;
++
++/**
++ * Tests of the validation with the marking workflow of mod_assign: corrections until publication and the
++ * publication guard.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\local\publication
++ * @covers     \gradingform_rubric_ranges\local\publication_guard
++ * @covers     \gradingform_rubric_ranges\local\validation_manager
++ */
++final class publication_test extends \advanced_testcase {
++    use \gradingform_rubric_ranges\ied_test_helper;
++
++    /** @var \stdClass */
++    private $course;
++    /** @var \gradingform_rubric_ranges_controller */
++    private $controller;
++    /** @var \assign */
++    private $assign;
++    /** @var int[] */
++    private $ids;
++    /** @var \stdClass */
++    private $teacher;
++    /** @var \stdClass */
++    private $validator;
++    /** @var \stdClass */
++    private $student;
++
++    /**
++     * Assignment with numeric grading, validation and (by default) the marking workflow.
++     *
++     * @param bool $workflow
++     */
++    private function setup_course(bool $workflow = true): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$this->course, , , $this->controller, $this->assign] =
++            $this->create_assign_with_rubric(null, [], ['markingworkflow' => (int) $workflow]);
++        $this->ids = $this->criterion_ids($this->controller);
++        $this->teacher = $this->getDataGenerator()->create_and_enrol($this->course, 'editingteacher');
++        $this->validator = $this->create_validator($this->course);
++        $this->student = $this->getDataGenerator()->create_and_enrol($this->course, 'student');
++    }
++
++    /**
++     * Saves the grading form as mod_assign does.
++     *
++     * @param \stdClass $grader
++     * @param array $grades criterion description => grade
++     * @param string $remark
++     * @param bool $validate
++     * @param string|null $state marking workflow state chosen in the form
++     */
++    private function save(\stdClass $grader, array $grades, string $remark, bool $validate, ?string $state): void {
++        $this->setUser($grader);
++        $data = (object) [
++            'advancedgrading' => $this->filling($this->ids, $grades, $remark, $validate),
++            'attemptnumber' => -1,
++            'sendstudentnotifications' => false,
++        ];
++        if ($state !== null) {
++            $data->workflowstate = $state;
++        }
++        $this->assign->save_grade($this->student->id, $data);
++    }
++
++    /**
++     * Grade of the student in the gradebook (null when there is none).
++     *
++     * @return float|null
++     */
++    private function gradebook(): ?float {
++        $grades = grade_get_grades($this->course->id, 'mod', 'assign', $this->assign->get_instance()->id, $this->student->id);
++        $grade = $grades->items[0]->grades[$this->student->id]->grade ?? null;
++        return $grade === null ? null : (float) $grade;
++    }
++
++    /**
++     * State of the current item for a user.
++     *
++     * @param \stdClass $user
++     * @return string
++     */
++    private function state_for(\stdClass $user): string {
++        $itemid = (int) $this->assign->get_user_grade($this->student->id, false)->id;
++        $this->setUser($user);
++        $instance = $this->controller->get_or_create_instance(0, $user->id, $itemid);
++        return validation_manager::get_state($instance, (int) $user->id);
++    }
++
++    /**
++     * Teacher grades, validator validates and corrects twice, then publishes; afterwards nobody can change it.
++     */
++    public function test_validate_correct_and_publish(): void {
++        $this->setup_course();
++        $itemid = fn() => (int) $this->assign->get_user_grade($this->student->id, false)->id;
++
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORREVIEW);
++        $this->assertNull($this->gradebook(), 'Nothing reaches the gradebook before publication');
++
++        $this->save($this->validator, ['C1' => 80, 'C2' => 10], 'Validated', true, ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE);
++        $this->assertNull($this->gradebook());
++        $this->assertSame(validation_manager::STATE_VALIDATED_EDITABLE, $this->state_for($this->validator));
++        $this->assertSame(validation_manager::STATE_VALIDATED, $this->state_for($this->teacher));
++
++        $sink = $this->redirectEvents();
++        $this->save($this->validator, ['C1' => 90, 'C2' => 10], 'Typo fixed', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE);
++        $this->save($this->validator, ['C1' => 85, 'C2' => 10], 'Typo fixed', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE);
++        $updates = array_values(array_filter($sink->get_events(), fn($e) => $e instanceof grade_validation_updated));
++        $sink->close();
++        $this->assertCount(2, $updates);
++        $this->assertSame(80, $updates[0]->other['changes'][0]['oldgrade']);
++        $this->assertSame(90, $updates[0]->other['changes'][0]['newgrade']);
++        $this->assertTrue($updates[0]->other['changes'][0]['remarkchanged']);
++        $this->assertSame(85, $updates[1]->other['changes'][0]['newgrade']);
++
++        $history = validation_manager::get_history($itemid())[$this->ids['C1']];
++        $this->assertSame(65, $history->get('teachergrade'), 'The original teacher grade is kept');
++        $this->assertSame('Teacher', $history->get('teacherremark'));
++        $this->assertSame(85, $history->get('validatedgrade'), 'The latest validated grade is kept');
++        $this->assertSame('Typo fixed', $history->get('validatedremark'));
++        $this->assertNull($this->gradebook());
++
++        // Publish: the validated grade reaches the gradebook. Publishing without changes keeps the validation time.
++        $timevalidated = validation_manager::get_history($itemid())[$this->ids['C1']]->get('timevalidated');
++        $this->waitForSecond();
++        $this->save($this->validator, ['C1' => 85, 'C2' => 10], 'Typo fixed', false, ASSIGN_MARKING_WORKFLOW_STATE_RELEASED);
++        $this->assertEqualsWithDelta(9500 / 110, $this->gradebook(), 0.001);
++        $this->assertSame($timevalidated, validation_manager::get_history($itemid())[$this->ids['C1']]->get('timevalidated'));
++
++        // Once published nobody can change it.
++        $this->assertSame(validation_manager::STATE_VALIDATED, $this->state_for($this->validator));
++        $this->save($this->validator, ['C1' => 10, 'C2' => 1], 'Late change', false, ASSIGN_MARKING_WORKFLOW_STATE_RELEASED);
++        $this->save($this->teacher, ['C1' => 10, 'C2' => 1], 'Late change', false, ASSIGN_MARKING_WORKFLOW_STATE_RELEASED);
++        $this->assertEqualsWithDelta(9500 / 110, $this->gradebook(), 0.001);
++        $this->assertSame(85, validation_manager::get_history($itemid())[$this->ids['C1']]->get('validatedgrade'));
++    }
++
++    /**
++     * Validating and publishing in the same save is allowed.
++     */
++    public function test_validate_and_publish_at_once(): void {
++        $this->setup_course();
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORREVIEW);
++        $this->save($this->validator, ['C1' => 80, 'C2' => 10], 'Validated', true, ASSIGN_MARKING_WORKFLOW_STATE_RELEASED);
++        $this->assertEqualsWithDelta(9000 / 110, $this->gradebook(), 0.001);
++        $flags = $this->assign->get_user_flags($this->student->id, false);
++        $this->assertSame(ASSIGN_MARKING_WORKFLOW_STATE_RELEASED, $flags->workflowstate);
++    }
++
++    /**
++     * Releasing from the grading form a grade not validated is reverted.
++     */
++    public function test_publication_blocked_from_form(): void {
++        $this->setup_course();
++        // No event sink here: it would stop the events from reaching the observer.
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, ASSIGN_MARKING_WORKFLOW_STATE_RELEASED);
++        $flags = $this->assign->get_user_flags($this->student->id, false);
++        $this->assertSame(ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE, $flags->workflowstate);
++        $this->assertNull($this->gradebook(), 'The grade is removed from the gradebook');
++    }
++
++    /**
++     * The guard triggers grade_publication_blocked (the observer is called directly, as event sinks do not
++     * dispatch to observers).
++     */
++    public function test_publication_blocked_event(): void {
++        $this->setup_course();
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORREVIEW);
++        $itemid = (int) $this->assign->get_user_grade($this->student->id, false)->id;
++        $event = \mod_assign\event\workflow_state_updated::create_from_user(
++            $this->assign,
++            $this->student,
++            ASSIGN_MARKING_WORKFLOW_STATE_RELEASED
++        );
++        $sink = $this->redirectEvents();
++        publication_guard::workflow_state_updated($event);
++        $blocked = array_values(array_filter($sink->get_events(), fn($e) => $e instanceof grade_publication_blocked));
++        $sink->close();
++        $this->assertCount(1, $blocked);
++        $this->assertEquals($this->student->id, $blocked[0]->relateduserid);
++        $this->assertSame($itemid, $blocked[0]->other['itemid']);
++        $this->assertStringContainsString(
++            "tried to release the grade of the user with id '{$this->student->id}'",
++            $blocked[0]->get_description()
++        );
++    }
++
++    /**
++     * Releasing in bulk (flags + gradebook update + event, as the bulk action does) a grade not validated is reverted.
++     */
++    public function test_publication_blocked_in_bulk(): void {
++        $this->setup_course();
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, ASSIGN_MARKING_WORKFLOW_STATE_READYFORREVIEW);
++        $this->setUser($this->teacher);
++        $flags = $this->assign->get_user_flags($this->student->id, true);
++        $flags->workflowstate = ASSIGN_MARKING_WORKFLOW_STATE_RELEASED;
++        $this->assign->update_user_flags($flags);
++        $this->assign->update_grade($this->assign->get_user_grade($this->student->id, true));
++        \mod_assign\event\workflow_state_updated::create_from_user(
++            $this->assign,
++            $this->student,
++            ASSIGN_MARKING_WORKFLOW_STATE_RELEASED
++        )->trigger();
++        $flags = $this->assign->get_user_flags($this->student->id, false);
++        $this->assertSame(ASSIGN_MARKING_WORKFLOW_STATE_READYFORRELEASE, $flags->workflowstate);
++        $this->assertNull($this->gradebook());
++    }
++
++    /**
++     * Without the marking workflow there is no publication: the validated grade is locked as in v1.0.0.
++     */
++    public function test_without_workflow(): void {
++        $this->setup_course(false);
++        $this->save($this->teacher, ['C1' => 65, 'C2' => 2], 'Teacher', false, null);
++        $this->save($this->validator, ['C1' => 80, 'C2' => 10], 'Validated', true, null);
++        $this->assertEqualsWithDelta(9000 / 110, $this->gradebook(), 0.001);
++        $this->assertSame(validation_manager::STATE_VALIDATED, $this->state_for($this->validator));
++        $instance = $this->controller->get_or_create_instance(
++            0,
++            $this->validator->id,
++            (int) $this->assign->get_user_grade($this->student->id, false)->id
++        );
++        $this->assertSame(publication::NO_WORKFLOW, publication::status($instance));
++    }
++}
+diff --git a/tests/renderer_test.php b/tests/renderer_test.php
+index 54ec2de..7851630 100644
+--- a/tests/renderer_test.php
++++ b/tests/renderer_test.php
+@@ -171,5 +171,45 @@ final class renderer_test extends \advanced_testcase {
+         $student = $renderer->display_instance($active, 0, false);
+         $this->assertStringNotContainsString('validated', $student);
+         $this->assertStringNotContainsString('Original grade', $student);
++
++        // Without the marking workflow the graders are warned that grades reach the students at once.
++        $this->assertStringContainsString('does not use the marking workflow', $validated);
++    }
++
++    /**
++     * With the marking workflow, a validated grade not published is editable for the validator only.
++     */
++    public function test_validated_pending_publication(): void {
++        global $PAGE;
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$course, , $context, $controller, $assign] = $this->create_assign_with_rubric(null, [], ['markingworkflow' => 1]);
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $validator = $this->create_validator($course);
++        $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
++        $itemid = (int) $assign->get_user_grade($student->id, true)->id;
++        $this->grade_as($teacher, $controller, $itemid, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T1'));
++        $this->grade_as($validator, $controller, $itemid, $this->filling($ids, ['C1' => 80, 'C2' => 7], 'V1', true));
++
++        $PAGE->set_context($context);
++        $PAGE->set_url('/');
++        $render = function (\stdClass $user) use ($controller, $itemid) {
++            global $PAGE;
++            $this->setUser($user);
++            $instance = $controller->get_or_create_instance(0, $user->id, $itemid);
++            $element = new \MoodleQuickForm_grading('advancedgrading', 'Grade', ['gradinginstance' => $instance]);
++            return $instance->render_grading_element($PAGE, $element);
++        };
++        $forvalidator = $render($validator);
++        $this->assertStringContainsString('you can still correct it until it is released', $forvalidator);
++        $this->assertMatchesRegularExpression('/<input type="number" name="advancedgrading\[criteria\]\[' . $ids['C1'] .
++            '\]\[grade\]"[^>]*value="80"/', $forvalidator);
++        $this->assertStringContainsString('Original grade: 65', $forvalidator);
++        $this->assertStringNotContainsString('does not use the marking workflow', $forvalidator);
++
++        $forteacher = $render($teacher);
++        $this->assertStringContainsString('pending publication by the validator and cannot be changed', $forteacher);
++        $this->assertStringNotContainsString('type="number"', $forteacher);
+     }
+ }
+diff --git a/version.php b/version.php
+index f0f454f..a893009 100644
+--- a/version.php
++++ b/version.php
+@@ -25,8 +25,8 @@
+ defined('MOODLE_INTERNAL') || die();
+ 
+ $plugin->component = 'gradingform_rubric_ranges';
+-$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
+-$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
++$plugin->version  = 2024112202;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 2.
++$plugin->release  = '2024112200-ied2'; // IED fork of upstream release 2024112200.
+ $plugin->requires = 2024100700;    // IED fork: requires Moodle 4.5 (the only version it is tested on).
+ $plugin->maturity = MATURITY_STABLE;
+ $plugin->supported = [405, 405];
+-- 
+2.39.2.windows.1
+

@@ -1,0 +1,274 @@
+# IED fork of gradingform_rubric_ranges
+
+This branch (`ied/MOODLE_402_STABLE`) extends the upstream Catalyst plugin
+(<https://github.com/catalyst/moodle-gradingform_rubric_ranges>) with:
+
+- criteria weighting,
+- numeric grading per criterion with automatic range detection and feedback,
+- academic validation with history,
+- weighted final grade.
+
+Every feature is **disabled by default**. With all of them disabled the plugin behaves exactly like upstream.
+
+## Base version
+
+| | |
+|---|---|
+| Upstream branch | `MOODLE_402_STABLE` |
+| Upstream commit | `2aece39` (release `2024112200`) |
+| Fork version | `2024112202` / `2024112200-ied2` (v1.1.0; v1.0.0 was `2024112201` / `2024112200-ied1`) |
+| Moodle | 4.5 LTS only (`requires = 2024100700`, `supported = [405, 405]`): the fork is only tested on 4.5 |
+
+## Patch series
+
+One commit per task, applied in order:
+
+| Patch | Content |
+|---|---|
+| `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
+| `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
+| `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
+| `0004-T3-…` | Academic validation with history and `grade_validated` event |
+| `0005-T4-…` | Weighted final grade |
+| `0006-T5-…` | Backup and restore of weights and validation history |
+| `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
+| `0008-T7-…` | PHPUnit tests of the IED extension |
+| `0009-T8-…` | QA hardening: Moodle 4.5 only, escaping, end to end gradebook test, coding style of the fork lines, setup guide |
+| `0010-T9-…` | v1.1.0: publication with the marking workflow of mod_assign, validator corrections until publication, publication guard |
+
+## Setting up the extension (site administrator)
+
+1. Apply the patches and run `php admin/cli/upgrade.php` (or visit *Site administration > Notifications*).
+2. Open `/grade/grading/form/rubric_ranges/settings_page.php` (also linked as "Ranged rubric settings" in the
+   activity navigation of a ranged rubric) and enable the features needed: weighting, numeric grading, validation.
+3. For validation, set up the roles (publication uses the marking workflow of mod_assign):
+   - **Teacher and subject/module coordinator** (same level, they give the same first grade): they need
+     `mod/assign:grade` but **not** `mod/assign:reviewgrades` nor `mod/assign:releasegrades`. The standard
+     *Teacher* role has both by default: prohibit them in the role used by teachers and coordinators.
+   - **Validator**: a new role based on the **Teacher** (or Manager) archetype with `mod/assign:grade`,
+     `mod/assign:reviewgrades`, `mod/assign:releasegrades` and `gradingform/rubric_ranges:validate`.
+   - Assign the roles in the course (or category). The validator must not be the teacher who grades: a user cannot
+     validate their own grade, and a validator cannot give the first grade. Site administrators are **not**
+     validators unless they get the role.
+4. In each assignment graded with a ranged rubric and validation, enable **"Use marking workflow"**. Without it
+   grades reach the students as soon as they are saved (the grading form warns) and a validated grade is locked at
+   once (there is no publication step). Optionally enable **"Hide grader identity from students"**: otherwise the
+   student sees the validator as "Graded by" (native mod_assign field).
+5. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
+   automatically (the rubric editor warns otherwise).
+6. Quick check: the teacher grades and sets *Ready for review*; the validator validates (*Ready for release*),
+   corrects if needed and publishes (*Released*); the student sees only the validator grade and feedback after
+   publication. The log shows *Ranged rubric grade validated* and *Ranged rubric validated grade corrected*.
+
+## Accepted limitations
+
+| Limitation | Reason |
+|---|---|
+| The grader side panel (forum) does not show the weights, the numeric grade or the validation | Out of scope; the lock of validated grades also applies there |
+| Validating needs JavaScript | The "Validate" button swaps the read only rubric for the editable one |
+| The `grade_validated` event has no `relateduserid` | There is no generic API to get the graded user from a grading item |
+| `DISPLAY_EVAL_FROZEN` does not render the points cell | Upstream behaviour; the stored grade is kept |
+| The privacy export of the grading is keyed by criterion description | Upstream export contract |
+| Enabling or disabling weighting does not recalculate grades already in the gradebook | Only grades saved afterwards use the new setting |
+| The grader side panel PHPUnit tests error on Moodle 4.5 | Upstream issue (MDL-76583), see Tests |
+| Publication (and its guard) only exists in assignments | Other activities have no marking workflow; validated grades are locked at once |
+| A blocked publication from the single grading form may still send the "grade updated" notification if "Notify students" was ticked | mod_assign sends it after the state change; the student sees neither the grade nor the feedback |
+| The user who releases needs `mod/assign:reviewgrades` (or `managegrades`) for the guard to remove a blocked grade from the gradebook | mod_assign only updates the gradebook for workflow states the user can set |
+| `moodle-cs` reports errors in upstream code | Upstream predates the current standard; only the lines added by the fork are kept clean (except a few lines inside upstream constructs and the language strings kept as a block at the end of the file to reduce patch conflicts) |
+
+## Generating the patches
+
+```bash
+git format-patch 2aece39..ied/MOODLE_402_STABLE -o ../rubric_ranges_patches
+```
+
+The patch files are not committed in this branch; they are published with each `ied-vX.Y.Z` tag.
+
+## Applying the patches on a clean upstream copy
+
+From the plugin root (`grade/grading/form/rubric_ranges`), on upstream commit `2aece39`:
+
+```bash
+git am -3 /path/to/patches/*.patch
+```
+
+Without git:
+
+```bash
+for p in /path/to/patches/*.patch; do patch -p1 < "$p"; done
+```
+
+Then run `php admin/cli/upgrade.php` from the Moodle root.
+
+## Rebasing on a new upstream version
+
+```bash
+git fetch upstream
+git rebase upstream/MOODLE_402_STABLE ied/MOODLE_402_STABLE
+# resolve conflicts, run the PHPUnit suite, then regenerate the series
+```
+
+Versioning rule after a rebase:
+
+- `$plugin->version` = upstream version + 1,
+- `$plugin->release` = `<upstream release>-iedN`.
+
+The fork upgrade steps in `db/upgrade.php` are idempotent (`table_exists` checks) so they are safe if upstream ever reuses a version number.
+
+## Settings
+
+Core does not load `settings.php` for `gradingform` plugins, so the feature flags are managed in a dedicated page:
+
+- URL: `/grade/grading/form/rubric_ranges/settings_page.php` (requires `moodle/site:config`).
+- Link: "Ranged rubric settings" in the activity navigation of a ranged rubric, visible to site administrators.
+- CLI: `php admin/cli/cfg.php --component=gradingform_rubric_ranges --name=enableweighting --set=1`
+- `config.php`: `$CFG->forced_plugin_settings['gradingform_rubric_ranges']['enableweighting'] = 1;`
+
+Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes made in the page are recorded in the config changes report.
+
+## Notes on criteria weighting
+
+- Criteria without a stored weight weigh 1, so existing rubrics need no migration.
+- Weights are only saved when they are submitted: disabling the feature keeps the configured weights.
+- Changing a weight in a rubric already used for grading requires regrading.
+- Enabling or disabling the feature does **not** recalculate grades already sent to the gradebook; it only
+  applies to grades saved afterwards.
+- Weights are only shown to graders and rubric managers, never to students.
+
+## Notes on the final grade
+
+- With weighting or numeric grading enabled the grade is calculated by `local\grade_calculator`; with both
+  disabled the upstream `get_grade()` code runs unchanged.
+- Without weighting the upstream formulas apply (with numeric grading every criterion goes from 0 to its maximum).
+- With weighting every criterion is normalised and averaged with its weight:
+  - `lockzeropoints` on: `f = Σ wᵢ·sᵢ/maxᵢ / Σ wᵢ`, grade = `max(min grade, f · max grade)`;
+  - `lockzeropoints` off: `f = Σ wᵢ·(sᵢ − minᵢ)/(maxᵢ − minᵢ) / Σ wᵢ`, grade = `min grade + f · (max grade − min grade)`.
+- Example: C1 (max 100, weight 3, grade 65) and C2 (max 10, weight 1, grade 2) give 53.75 / 100
+  (60.91 without weighting).
+- With equal weights the result equals upstream only when every criterion has the same maximum
+  (`lockzeropoints` on) or the same minimum and maximum (`lockzeropoints` off).
+- Criteria that cannot be normalised (maximum 0, or maximum equal to minimum) are left out; a criterion without
+  filling counts 0 with its weight. Rounding and scales work as upstream.
+- With numeric grading `get_min_max_score()` returns a minimum of 0, so the "minimum score is not 0" warning and
+  the grade mapping explanation are consistent with the ranges.
+
+## Notes on numeric grading
+
+- Every criterion gets an integer grade from 0 to its maximum. Ranges are the upstream ones: the lowest
+  level goes from 0 to its score and every other level from the previous score + 1 to its own score.
+- The server always decides the level from the grade (the JS only gives instant feedback).
+- The definition of the level is proposed as the criterion remark; a remark edited by the grader is never
+  overwritten. This needs "Allow grader to add text remarks for each criterion": the rubric editor warns
+  when it is disabled.
+- With numeric grading the minimum score of each criterion is 0 for the grade calculation.
+- Fillings saved before enabling it keep their level score when the stored grade does not match the level.
+- Not supported in the grader side panel (out of scope); criteria submitted without grade are handled as upstream.
+- Known upstream limitation kept as is: in `DISPLAY_EVAL_FROZEN` the points cell is not rendered, so only the
+  hidden level travels (the stored grade is kept).
+
+## Notes on academic validation
+
+- **v1.1.0, with the marking workflow of mod_assign** (recommended setup):
+  - teacher or coordinator grade (one shared grade) → *Ready for review*;
+  - the validator validates → the grade is **validated, pending publication** (*Ready for release*): the validator
+    can correct it as many times as needed; the teacher can no longer change it;
+  - the validator publishes (*Released*, one by one or in bulk): the student sees the validator grade and
+    feedback; from then on **nobody can change it**;
+  - before publication the student sees nothing and the gradebook is empty (native mod_assign behaviour);
+  - each correction keeps the original teacher grade, stores the latest validator grade, level, feedback, validator
+    and date, and triggers `grade_validation_updated` with the previous and new values;
+  - a grade **cannot be released before it is validated**, from the grading form, quick grading or the bulk action:
+    the plugin sets it back to *Ready for release* (mod_assign removes it from the gradebook), warns and triggers
+    `grade_publication_blocked`. Validating and releasing in the same save is allowed.
+- Without the marking workflow (or in other activities) the v1.0.0 rules apply: the validated grade is locked at
+  once, and the grading form warns that grades reach the students as soon as they are saved.
+- A grade (grading item) can be validated, optionally, by a user with
+  `gradingform/rubric_ranges:validate` who is not the grader of the current grade (no self validation).
+- Site administrators are **not** validators by default: the capability is checked without "do anything",
+  so they need a role that grants it explicitly.
+- Flow: the teacher grades; the validator opens the grading form, sees the teacher grade read only and clicks
+  "Validate"; the validator grade and feedback replace the teacher ones and the original teacher grade, level
+  and feedback are kept in `gradingform_rubric_ranges_h` with the validator and the date.
+- A grade is validated when it has history. Then it is read only (for the validator too once published, or at once
+  without marking workflow): any submission is ignored and the current grade is kept (an empty submission never
+  wipes it).
+- A validator cannot give the first grade: when the teacher has not graded yet, the rubric is read only.
+- Saving without clicking "Validate" keeps the teacher grade.
+- Graders see "Grade validated by…" and the original grade of each criterion; students do not see the validation.
+- The `\gradingform_rubric_ranges\event\grade_validated` event identifies the graded item by `other.itemid`
+  (there is no generic API to get the student from it, so `relateduserid` is not set).
+- JavaScript is required to validate. Validation from the grader side panel is out of scope, but the lock
+  also applies there.
+- With `enablevalidation` disabled the plugin behaves as upstream, even for grades validated before.
+
+## Notes on backup and restore
+
+- Weights hang from each criterion (`rubric_ranges_weight`): they are copied with or without user data.
+- The validation history hangs from each grading instance (`rubric_ranges_validations`): like the grades, it is
+  only copied with user data. Teacher and validator are annotated as users of the backup. The persistent
+  technical fields are regenerated on restore; `timevalidated` is kept.
+- On restore, instance, criterion, levels, graded item and users are remapped. A row whose criterion or graded
+  item cannot be mapped is skipped. When the teacher or the validator cannot be mapped the row is kept with an
+  empty user, so the grade stays validated and locked.
+- Backups made before the fork restore with weight 1 and no validation. Backups made with the fork restore as
+  upstream in a site with the upstream plugin (unknown elements are ignored). Duplicate and import (no user
+  data) copy the weights but not the history.
+
+## Notes on privacy
+
+- Graded user (called by `core_grading` through `gradingform_provider_v2`): the export includes the numeric
+  grade of each criterion, criteria without level, and the validation history (original and validated grade,
+  level and feedback, and the date) **without** the identity of the teacher or the validator. Deleting the
+  user's data deletes the fillings and the validation history of the instances.
+- Teacher and validator: the plugin is also a `plugin\provider` and `core_userlist_provider` on its own (no
+  precedent in core for combining it with `gradingform_provider_v2`, but the privacy manager allows it and the
+  component is reported compliant). Their export lists the validations they did or that affected their grades
+  (role, item, criterion, grades, date and only the feedback they wrote). On deletion they are **anonymised**
+  (`validatorid` 0, `teacherid` null): the rows are kept so the grade stays validated.
+- `gradingform_rubric_ranges_w.usermodified` is declared and treated like core treats the grading
+  definitions (not exported apart nor deleted).
+- Upstream fix: the export used a `JOIN` on levels, so criteria without level were lost.
+- Known upstream limitation kept as is: the export is keyed by the criterion description, so criteria with the
+  same description are merged. Changing the key would change the export contract (and the upstream test).
+
+## Tests
+
+Set up PHPUnit once (`config.php` needs `$CFG->phpunit_prefix` and `$CFG->phpunit_dataroot`):
+
+```bash
+composer install
+php admin/tool/phpunit/cli/init.php
+```
+
+Run the plugin suite:
+
+```bash
+vendor/bin/phpunit --testsuite gradingform_rubric_ranges_testsuite
+```
+
+- The IED tests (`tests/local`, `tests/event`, `tests/privacy/provider_ied_test.php`, `tests/*_test.php` and the shared
+  `tests/ied_test_helper.php`) cover weights, ranges, final grade, validation and its event, rendering, backup and
+  restore, privacy, and the upstream behaviour with every feature disabled. The upstream generator and tests are not
+  modified.
+- **Known upstream issue, not fixed:** the grader side panel tests (`tests/grades/grader/gradingpanel/external`,
+  12 tests) error on Moodle 4.5 because they include `lib/externallib.php`, which since MDL-76583 requires the
+  `@runInSeparateProcess` annotation in the test itself (`--process-isolation` is not enough). They are upstream
+  tests of a feature out of the scope of the fork and are unchanged since `2aece39`.
+- The byte to byte comparison of the rendered HTML with upstream needs both code bases, so it is not part of the
+  suite: render every display mode with fixed data and all features disabled on the fork and on `2aece39`, and diff.
+
+## Upstream fixes included
+
+- `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+  marked for regrade. Same field name fix in `edit.php` for the `lockzeropoints` warning.
+- With numeric grading enabled, the PHP warning for the undefined `$currentgrade` in `criterion_template()`
+  (remarks disabled, `DISPLAY_EVAL_FROZEN`) no longer happens.
+
+## Data access
+
+Tables added by the fork are accessed only through `\core\persistent` classes (`classes/persistent`);
+business rules live in `classes/local`.
+
+## Capability
+
+`gradingform/rubric_ranges:validate` (module context). It is not granted to any archetype: grant it to the validator role, which must also be able to grade the activity (e.g. a copy of the teacher or manager role).

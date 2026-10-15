@@ -1,0 +1,515 @@
+From eb8972b76fe635c7dc5ea42efde3714f0855aa49 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 17:36:03 +0200
+Subject: [PATCH 07/10] T6: add privacy provider for the IED data
+
+- Graded user: the export (through core_grading) includes the numeric
+  grade, criteria without level and the validation history (original and
+  validated grade, level, feedback and date) without the identity of the
+  teacher or the validator. Deletion removes the history of the instances.
+- Teacher and validator: the plugin is also a plugin\provider and
+  core_userlist_provider. They get the validations they did or that
+  affected their grades; on deletion they are anonymised and the rows are
+  kept, so the grade stays validated.
+- Metadata for the numeric grade, the validation history and the weights.
+- Fix upstream export: LEFT JOIN on levels so criteria without level are
+  not lost. The export stays keyed by criterion description as upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                            |  18 ++
+ classes/local/validation_manager.php  | 126 +++++++++++++-
+ classes/privacy/provider.php          | 235 +++++++++++++++++++++++++-
+ lang/en/gradingform_rubric_ranges.php |  16 ++
+ 4 files changed, 383 insertions(+), 12 deletions(-)
+
+diff --git a/PATCHES.md b/PATCHES.md
+index 65d322d..dfa5800 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -31,6 +31,7 @@ One commit per task, applied in order:
+ | `0004-T3-…` | Academic validation with history and `grade_validated` event |
+ | `0005-T4-…` | Weighted final grade |
+ | `0006-T5-…` | Backup and restore of weights and validation history |
++| `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -157,6 +158,23 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+   upstream in a site with the upstream plugin (unknown elements are ignored). Duplicate and import (no user
+   data) copy the weights but not the history.
+ 
++## Notes on privacy
++
++- Graded user (called by `core_grading` through `gradingform_provider_v2`): the export includes the numeric
++  grade of each criterion, criteria without level, and the validation history (original and validated grade,
++  level and feedback, and the date) **without** the identity of the teacher or the validator. Deleting the
++  user's data deletes the fillings and the validation history of the instances.
++- Teacher and validator: the plugin is also a `plugin\provider` and `core_userlist_provider` on its own (no
++  precedent in core for combining it with `gradingform_provider_v2`, but the privacy manager allows it and the
++  component is reported compliant). Their export lists the validations they did or that affected their grades
++  (role, item, criterion, grades, date and only the feedback they wrote). On deletion they are **anonymised**
++  (`validatorid` 0, `teacherid` null): the rows are kept so the grade stays validated.
++- `gradingform_rubric_ranges_w.usermodified` is declared and treated like core treats the grading
++  definitions (not exported apart nor deleted).
++- Upstream fix: the export used a `JOIN` on levels, so criteria without level were lost.
++- Known upstream limitation kept as is: the export is keyed by the criterion description, so criteria with the
++  same description are merged. Changing the key would change the export contract (and the upstream test).
++
+ ## Upstream fixes included
+ 
+ - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+diff --git a/classes/local/validation_manager.php b/classes/local/validation_manager.php
+index f5feb68..43a1124 100644
+--- a/classes/local/validation_manager.php
++++ b/classes/local/validation_manager.php
+@@ -235,17 +235,129 @@ final class validation_manager {
+      * @param int[] $criterionids
+      */
+     public static function delete_for_criteria(array $criterionids): void {
++        foreach (self::get_records_in('criterionid', $criterionids) as $record) {
++            $record->delete();
++        }
++    }
++
++    /**
++     * Returns the validation history stored in a grading instance.
++     *
++     * @param int $instanceid
++     * @return validation_history[]
++     */
++    public static function get_history_for_instance(int $instanceid): array {
++        return validation_history::get_records(['instanceid' => $instanceid], 'criterionid');
++    }
++
++    /**
++     * Deletes the validation history stored in the given grading instances.
++     *
++     * @param int[] $instanceids
++     */
++    public static function delete_for_instances(array $instanceids): void {
++        foreach (self::get_records_in('instanceid', $instanceids) as $record) {
++            $record->delete();
++        }
++    }
++
++    /**
++     * Returns the validation history of the given criteria where the user is the teacher or the validator.
++     *
++     * @param int $userid
++     * @param int[] $criterionids
++     * @return validation_history[]
++     */
++    public static function get_history_for_user(int $userid, array $criterionids): array {
++        return array_filter(self::get_records_in('criterionid', $criterionids), function($record) use ($userid) {
++            return (int) $record->get('teacherid') === $userid || (int) $record->get('validatorid') === $userid;
++        });
++    }
++
++    /**
++     * Anonymises a user in the validation history of the given criteria (privacy deletion request).
++     *
++     * The rows are kept, so the grades stay validated and the original student grade is preserved.
++     *
++     * @param int $userid
++     * @param int[] $criterionids
++     */
++    public static function anonymise_user(int $userid, array $criterionids): void {
++        foreach (self::get_history_for_user($userid, $criterionids) as $record) {
++            self::anonymise($record, $userid);
++        }
++    }
++
++    /**
++     * Anonymises every user in the validation history of the given criteria.
++     *
++     * @param int[] $criterionids
++     */
++    public static function anonymise_all(array $criterionids): void {
++        foreach (self::get_records_in('criterionid', $criterionids) as $record) {
++            self::anonymise($record, null);
++        }
++    }
++
++    /**
++     * Returns the criteria of the ranged rubrics defined in the given contexts.
++     *
++     * Direct query on upstream and core tables: there is no persistent for them, and the grading manager API
++     * (get_controller) creates grading areas as a side effect and needs the course module to exist, which is not
++     * the case when a context is being deleted.
++     *
++     * @param int[] $contextids
++     * @return array criterionid => description
++     */
++    public static function criteria_in_contexts(array $contextids): array {
+         global $DB;
+ 
+-        $criterionids = array_filter(array_map('intval', $criterionids));
+-        if (empty($criterionids)) {
+-            return;
++        $contextids = array_filter(array_map('intval', $contextids));
++        if (empty($contextids)) {
++            return [];
+         }
+-        // Only builds the SQL fragment, the query is run by the persistent.
+-        [$insql, $params] = $DB->get_in_or_equal($criterionids, SQL_PARAMS_NAMED);
+-        foreach (validation_history::get_records_select("criterionid $insql", $params) as $record) {
+-            $record->delete();
++        [$insql, $params] = $DB->get_in_or_equal($contextids, SQL_PARAMS_NAMED);
++        $params['method'] = 'rubric_ranges';
++        return $DB->get_records_sql_menu("SELECT c.id, c.description
++                                            FROM {gradingform_rubric_ranges_c} c
++                                            JOIN {grading_definitions} d ON d.id = c.definitionid AND d.method = :method
++                                            JOIN {grading_areas} a ON a.id = d.areaid
++                                           WHERE a.contextid $insql", $params);
++    }
++
++    /**
++     * Removes the user (or every user when null) from a history row.
++     *
++     * @param validation_history $record
++     * @param int|null $userid
++     */
++    private static function anonymise(validation_history $record, ?int $userid): void {
++        if ($userid === null || (int) $record->get('teacherid') === $userid) {
++            $record->set('teacherid', null);
++        }
++        if ($userid === null || (int) $record->get('validatorid') === $userid) {
++            $record->set('validatorid', 0);
+         }
++        $record->update();
++    }
++
++    /**
++     * Returns the history records whose field is in the given list of ids.
++     *
++     * @param string $field
++     * @param int[] $ids
++     * @return validation_history[]
++     */
++    private static function get_records_in(string $field, array $ids): array {
++        global $DB;
++
++        $ids = array_filter(array_map('intval', $ids));
++        if (empty($ids)) {
++            return [];
++        }
++        // Only builds the SQL fragment, the query is run by the persistent.
++        [$insql, $params] = $DB->get_in_or_equal($ids, SQL_PARAMS_NAMED);
++        return validation_history::get_records_select("$field $insql", $params);
+     }
+ 
+     /**
+diff --git a/classes/privacy/provider.php b/classes/privacy/provider.php
+index 2ec1eaf..69a9757 100644
+--- a/classes/privacy/provider.php
++++ b/classes/privacy/provider.php
+@@ -25,16 +25,29 @@
+ namespace gradingform_rubric_ranges\privacy;
+ 
+ use \core_privacy\local\metadata\collection;
++use core_privacy\local\request\approved_contextlist;
++use core_privacy\local\request\approved_userlist;
++use core_privacy\local\request\contextlist;
++use core_privacy\local\request\transform;
++use core_privacy\local\request\userlist;
++use core_privacy\local\request\writer;
++use gradingform_rubric_ranges\local\validation_manager;
+ 
+ /**
+  * Privacy class for requesting user data.
+  *
++ * IED extension: besides the data of the graded user (called by core_grading through gradingform_provider_v2),
++ * the plugin is a provider on its own for the teacher and the validator stored in the validation history:
++ * their data is exported and, on deletion, anonymised so the grade stays validated.
++ *
+  * @copyright  2018 Sara Arjona <sara@moodle.com>
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
+ class provider implements
+         \core_privacy\local\metadata\provider,
+-        \core_grading\privacy\gradingform_provider_v2 {
++        \core_grading\privacy\gradingform_provider_v2,
++        \core_privacy\local\request\plugin\provider,
++        \core_privacy\local\request\core_userlist_provider {
+ 
+     /**
+      * Returns meta data about this system.
+@@ -47,8 +60,25 @@ class provider implements
+             'instanceid' => 'privacy:metadata:instanceid',
+             'criterionid' => 'privacy:metadata:criterionid',
+             'levelid' => 'privacy:metadata:levelid',
+-            'remark' => 'privacy:metadata:remark'
++            'remark' => 'privacy:metadata:remark',
++            'grade' => 'privacy:metadata:grade', // IED extension.
+         ], 'privacy:metadata:fillingssummary');
++        // IED extension: validation history and criteria weights.
++        $collection->add_database_table('gradingform_rubric_ranges_h', [
++            'itemid' => 'privacy:metadata:validation:itemid',
++            'criterionid' => 'privacy:metadata:criterionid',
++            'teachergrade' => 'privacy:metadata:validation:teachergrade',
++            'teacherremark' => 'privacy:metadata:validation:teacherremark',
++            'teacherid' => 'privacy:metadata:validation:teacherid',
++            'validatedgrade' => 'privacy:metadata:validation:validatedgrade',
++            'validatedremark' => 'privacy:metadata:validation:validatedremark',
++            'validatorid' => 'privacy:metadata:validation:validatorid',
++            'timevalidated' => 'privacy:metadata:validation:timevalidated',
++            'usermodified' => 'privacy:metadata:usermodified',
++        ], 'privacy:metadata:validationhistory');
++        $collection->add_database_table('gradingform_rubric_ranges_w', [
++            'usermodified' => 'privacy:metadata:usermodified',
++        ], 'privacy:metadata:weights');
+         return $collection;
+     }
+ 
+@@ -63,16 +93,53 @@ class provider implements
+         global $DB;
+         // Get records from the provided params.
+         $params = ['instanceid' => $instanceid];
+-        $sql = "SELECT rc.description, rl.definition, rl.score, rf.remark
++        // IED extension: also criteria without level (LEFT JOIN) and the numeric grade. The export stays keyed by
++        // the criterion description, as upstream (criteria with the same description are merged: known limitation).
++        $sql = "SELECT rc.description, rl.definition, rl.score, rf.grade, rf.remark
+                   FROM {gradingform_rubric_ranges_f} rf
+                   JOIN {gradingform_rubric_ranges_c} rc ON rc.id = rf.criterionid
+-                  JOIN {gradingform_rubric_ranges_l} rl ON rf.levelid = rl.id
++             LEFT JOIN {gradingform_rubric_ranges_l} rl ON rf.levelid = rl.id
+                  WHERE rf.instanceid = :instanceid";
+         $records = $DB->get_records_sql($sql, $params);
++        $subcontext = array_merge($subcontext, [get_string('rubric', 'gradingform_rubric_ranges'), $instanceid]);
+         if ($records) {
+-            $subcontext = array_merge($subcontext, [get_string('rubric', 'gradingform_rubric_ranges'), $instanceid]);
+             \core_privacy\local\request\writer::with_context($context)->export_data($subcontext, (object) $records);
+         }
++        self::export_instance_validation($context, $instanceid, $subcontext);
++    }
++
++    /**
++     * IED extension: exports the validation history stored in an instance for the graded user.
++     *
++     * Grades, levels, feedback and date only: the identity of the teacher and the validator is not exported.
++     *
++     * @param \context $context
++     * @param int $instanceid
++     * @param array $subcontext
++     */
++    protected static function export_instance_validation(\context $context, int $instanceid, array $subcontext) {
++        $history = validation_manager::get_history_for_instance($instanceid);
++        if (empty($history)) {
++            return;
++        }
++        $levels = self::level_definitions($history);
++        $criteria = self::criterion_descriptions($history);
++        $data = [];
++        foreach ($history as $record) {
++            $data[] = (object) [
++                'criterion' => $criteria[$record->get('criterionid')] ?? '',
++                'originalgrade' => $record->get('teachergrade'),
++                'originallevel' => $levels[$record->get('teacherlevelid')] ?? null,
++                'originalfeedback' => $record->get('teacherremark'),
++                'validatedgrade' => $record->get('validatedgrade'),
++                'validatedlevel' => $levels[$record->get('validatedlevelid')] ?? null,
++                'validatedfeedback' => $record->get('validatedremark'),
++                'timevalidated' => transform::datetime($record->get('timevalidated')),
++            ];
++        }
++        writer::with_context($context)->export_data(
++            array_merge($subcontext, [get_string('privacy:validation', 'gradingform_rubric_ranges')]),
++            (object) ['validation' => $data]);
+     }
+ 
+     /**
+@@ -83,5 +150,163 @@ class provider implements
+     public static function delete_gradingform_for_instances(array $instanceids) {
+         global $DB;
+         $DB->delete_records_list('gradingform_rubric_ranges_f', 'instanceid', $instanceids);
++        // IED extension: validation history of the graded user.
++        validation_manager::delete_for_instances($instanceids);
++    }
++
++    /**
++     * IED extension: contexts where the user is the teacher or the validator of a validated grade.
++     *
++     * The privacy API needs SQL to collect contexts; it is the only SQL on the plugin tables.
++     *
++     * @param int $userid
++     * @return contextlist
++     */
++    public static function get_contexts_for_userid(int $userid): contextlist {
++        $contextlist = new contextlist();
++        $contextlist->add_from_sql("SELECT a.contextid
++                                      FROM {gradingform_rubric_ranges_h} h
++                                      JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
++                                      JOIN {grading_definitions} d ON d.id = c.definitionid
++                                      JOIN {grading_areas} a ON a.id = d.areaid
++                                     WHERE h.teacherid = :teacherid OR h.validatorid = :validatorid",
++            ['teacherid' => $userid, 'validatorid' => $userid]);
++        return $contextlist;
++    }
++
++    /**
++     * IED extension: teachers and validators of the validation history in a context.
++     *
++     * @param userlist $userlist
++     */
++    public static function get_users_in_context(userlist $userlist) {
++        $context = $userlist->get_context();
++        if ($context->contextlevel != CONTEXT_MODULE) {
++            return;
++        }
++        $sql = "SELECT h.teacherid, h.validatorid
++                  FROM {gradingform_rubric_ranges_h} h
++                  JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
++                  JOIN {grading_definitions} d ON d.id = c.definitionid
++                  JOIN {grading_areas} a ON a.id = d.areaid
++                 WHERE a.contextid = :contextid";
++        $userlist->add_from_sql('teacherid', $sql, ['contextid' => $context->id]);
++        $userlist->add_from_sql('validatorid', $sql, ['contextid' => $context->id]);
++    }
++
++    /**
++     * IED extension: exports the validations where the user is the teacher or the validator.
++     *
++     * @param approved_contextlist $contextlist
++     */
++    public static function export_user_data(approved_contextlist $contextlist) {
++        $userid = (int) $contextlist->get_user()->id;
++        foreach ($contextlist->get_contexts() as $context) {
++            $criteria = validation_manager::criteria_in_contexts([$context->id]);
++            $history = validation_manager::get_history_for_user($userid, array_keys($criteria));
++            if (empty($history)) {
++                continue;
++            }
++            $data = [];
++            foreach ($history as $record) {
++                $isteacher = (int) $record->get('teacherid') === $userid;
++                $isvalidator = (int) $record->get('validatorid') === $userid;
++                $roles = [];
++                if ($isteacher) {
++                    $roles[] = get_string('privacy:role:teacher', 'gradingform_rubric_ranges');
++                }
++                if ($isvalidator) {
++                    $roles[] = get_string('privacy:role:validator', 'gradingform_rubric_ranges');
++                }
++                $data[] = (object) [
++                    'role' => implode(', ', $roles),
++                    'itemid' => $record->get('itemid'),
++                    'criterion' => $criteria[$record->get('criterionid')] ?? '',
++                    'originalgrade' => $record->get('teachergrade'),
++                    'validatedgrade' => $record->get('validatedgrade'),
++                    'timevalidated' => transform::datetime($record->get('timevalidated')),
++                    // Only the feedback written by the user.
++                    'originalfeedback' => $isteacher ? $record->get('teacherremark') : null,
++                    'validatedfeedback' => $isvalidator ? $record->get('validatedremark') : null,
++                ];
++            }
++            writer::with_context($context)->export_data([
++                get_string('rubric', 'gradingform_rubric_ranges'),
++                get_string('privacy:validations', 'gradingform_rubric_ranges'),
++            ], (object) ['validations' => $data]);
++        }
++    }
++
++    /**
++     * IED extension: anonymises the teachers and validators of the validation history in a context.
++     *
++     * The data of the graded users is deleted through the activity (core_grading).
++     *
++     * @param \context $context
++     */
++    public static function delete_data_for_all_users_in_context(\context $context) {
++        if ($context->contextlevel != CONTEXT_MODULE) {
++            return;
++        }
++        validation_manager::anonymise_all(array_keys(validation_manager::criteria_in_contexts([$context->id])));
++    }
++
++    /**
++     * IED extension: anonymises the user as teacher or validator in the approved contexts.
++     *
++     * @param approved_contextlist $contextlist
++     */
++    public static function delete_data_for_user(approved_contextlist $contextlist) {
++        $criteria = validation_manager::criteria_in_contexts($contextlist->get_contextids());
++        validation_manager::anonymise_user((int) $contextlist->get_user()->id, array_keys($criteria));
++    }
++
++    /**
++     * IED extension: anonymises the users as teachers or validators in the context.
++     *
++     * @param approved_userlist $userlist
++     */
++    public static function delete_data_for_users(approved_userlist $userlist) {
++        $criteria = array_keys(validation_manager::criteria_in_contexts([$userlist->get_context()->id]));
++        foreach ($userlist->get_userids() as $userid) {
++            validation_manager::anonymise_user((int) $userid, $criteria);
++        }
++    }
++
++    /**
++     * IED extension: definitions of the levels referenced by the history (upstream table, no API).
++     *
++     * @param array $history validation_history records
++     * @return array levelid => definition
++     */
++    protected static function level_definitions(array $history): array {
++        global $DB;
++        $ids = [];
++        foreach ($history as $record) {
++            $ids[] = $record->get('teacherlevelid');
++            $ids[] = $record->get('validatedlevelid');
++        }
++        $ids = array_unique(array_filter($ids));
++        if (empty($ids)) {
++            return [];
++        }
++        [$insql, $params] = $DB->get_in_or_equal($ids);
++        return $DB->get_records_select_menu('gradingform_rubric_ranges_l', "id $insql", $params, '', 'id, definition');
++    }
++
++    /**
++     * IED extension: descriptions of the criteria referenced by the history (upstream table, no API).
++     *
++     * @param array $history validation_history records
++     * @return array criterionid => description
++     */
++    protected static function criterion_descriptions(array $history): array {
++        global $DB;
++        $ids = array_unique(array_map(fn($record) => $record->get('criterionid'), $history));
++        if (empty($ids)) {
++            return [];
++        }
++        [$insql, $params] = $DB->get_in_or_equal($ids);
++        return $DB->get_records_select_menu('gradingform_rubric_ranges_c', "id $insql", $params, '', 'id, description');
+     }
+ }
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index 0f3ba70..9bcf223 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -119,6 +119,22 @@ $string['enableweighting_help'] = 'If enabled, every criterion has a weight from
+ $string['eventgradevalidated'] = 'Ranged rubric grade validated';
+ $string['gradeinput'] = 'Grade for criterion {$a}';
+ $string['numericnoremarks'] = 'Numeric grading is enabled but remarks are not allowed in this rubric, so the feedback of the level will not be applied automatically. Tick "Allow grader to add text remarks for each criterion" to enable it.';
++$string['privacy:metadata:grade'] = 'The numeric grade given for the criterion.';
++$string['privacy:metadata:usermodified'] = 'The user who last modified the record.';
++$string['privacy:metadata:validation:itemid'] = 'An identifier of the graded item in the activity.';
++$string['privacy:metadata:validation:teachergrade'] = 'The grade given by the teacher before the validation.';
++$string['privacy:metadata:validation:teacherid'] = 'The teacher who gave the original grade.';
++$string['privacy:metadata:validation:teacherremark'] = 'The feedback given by the teacher before the validation.';
++$string['privacy:metadata:validation:timevalidated'] = 'When the grade was validated.';
++$string['privacy:metadata:validation:validatedgrade'] = 'The grade given by the validator.';
++$string['privacy:metadata:validation:validatedremark'] = 'The feedback given by the validator.';
++$string['privacy:metadata:validation:validatorid'] = 'The user who validated the grade.';
++$string['privacy:metadata:validationhistory'] = 'Stores the original teacher grade and feedback of each criterion when a grade is validated.';
++$string['privacy:metadata:weights'] = 'Stores the weight of each criterion of the rubric.';
++$string['privacy:role:teacher'] = 'Teacher';
++$string['privacy:role:validator'] = 'Validator';
++$string['privacy:validation'] = 'Validation';
++$string['privacy:validations'] = 'Validations';
+ $string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
+ $string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
+ $string['settingspage'] = 'Ranged rubric settings';
+-- 
+2.39.2.windows.1
+

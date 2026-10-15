@@ -1,0 +1,1787 @@
+From c05734dea9e76dc89a35b3ff870a3d5cbd86ee6f Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 21:32:26 +0200
+Subject: [PATCH 08/10] T7: add PHPUnit tests of the IED extension
+
+- Shared helper (tests/ied_test_helper.php); the upstream generator and
+  tests are not modified.
+- Tests for weights, ranges, final grade calculation, academic
+  validation and its event, numeric grading, rendering, backup and
+  restore, privacy, and the upstream behaviour with every feature off.
+- Document how to run the suite and the known upstream issue: the grader
+  side panel tests error on Moodle 4.5 (MDL-76583, externallib requires
+  process isolation); they are out of scope and unchanged since 2aece39.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                              |  27 +++
+ tests/backup_restore_test.php           | 140 ++++++++++++++++
+ tests/event/grade_validated_test.php    |  73 +++++++++
+ tests/ied_test_helper.php               | 179 ++++++++++++++++++++
+ tests/local/grade_calculator_test.php   | 177 ++++++++++++++++++++
+ tests/local/range_resolver_test.php     | 160 ++++++++++++++++++
+ tests/local/validation_manager_test.php | 208 ++++++++++++++++++++++++
+ tests/local/weights_test.php            | 175 ++++++++++++++++++++
+ tests/numeric_grading_test.php          |  92 +++++++++++
+ tests/privacy/provider_ied_test.php     | 180 ++++++++++++++++++++
+ tests/renderer_test.php                 | 152 +++++++++++++++++
+ tests/upstream_compat_test.php          |  96 +++++++++++
+ 12 files changed, 1659 insertions(+)
+ create mode 100644 tests/backup_restore_test.php
+ create mode 100644 tests/event/grade_validated_test.php
+ create mode 100644 tests/ied_test_helper.php
+ create mode 100644 tests/local/grade_calculator_test.php
+ create mode 100644 tests/local/range_resolver_test.php
+ create mode 100644 tests/local/validation_manager_test.php
+ create mode 100644 tests/local/weights_test.php
+ create mode 100644 tests/numeric_grading_test.php
+ create mode 100644 tests/privacy/provider_ied_test.php
+ create mode 100644 tests/renderer_test.php
+ create mode 100644 tests/upstream_compat_test.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index dfa5800..77f8565 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -32,6 +32,7 @@ One commit per task, applied in order:
+ | `0005-T4-…` | Weighted final grade |
+ | `0006-T5-…` | Backup and restore of weights and validation history |
+ | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
++| `0008-T7-…` | PHPUnit tests of the IED extension |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -175,6 +176,32 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+ - Known upstream limitation kept as is: the export is keyed by the criterion description, so criteria with the
+   same description are merged. Changing the key would change the export contract (and the upstream test).
+ 
++## Tests
++
++Set up PHPUnit once (`config.php` needs `$CFG->phpunit_prefix` and `$CFG->phpunit_dataroot`):
++
++```bash
++composer install
++php admin/tool/phpunit/cli/init.php
++```
++
++Run the plugin suite:
++
++```bash
++vendor/bin/phpunit --testsuite gradingform_rubric_ranges_testsuite
++```
++
++- The IED tests (`tests/local`, `tests/event`, `tests/privacy/provider_ied_test.php`, `tests/*_test.php` and the shared
++  `tests/ied_test_helper.php`) cover weights, ranges, final grade, validation and its event, rendering, backup and
++  restore, privacy, and the upstream behaviour with every feature disabled. The upstream generator and tests are not
++  modified.
++- **Known upstream issue, not fixed:** the grader side panel tests (`tests/grades/grader/gradingpanel/external`,
++  12 tests) error on Moodle 4.5 because they include `lib/externallib.php`, which since MDL-76583 requires the
++  `@runInSeparateProcess` annotation in the test itself (`--process-isolation` is not enough). They are upstream
++  tests of a feature out of the scope of the fork and are unchanged since `2aece39`.
++- The byte to byte comparison of the rendered HTML with upstream needs both code bases, so it is not part of the
++  suite: render every display mode with fixed data and all features disabled on the fork and on `2aece39`, and diff.
++
+ ## Upstream fixes included
+ 
+ - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+diff --git a/tests/backup_restore_test.php b/tests/backup_restore_test.php
+new file mode 100644
+index 0000000..6aa5149
+--- /dev/null
++++ b/tests/backup_restore_test.php
+@@ -0,0 +1,140 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once(__DIR__ . '/ied_test_helper.php');
++require_once($CFG->dirroot . '/backup/util/includes/backup_includes.php');
++require_once($CFG->dirroot . '/backup/util/includes/restore_includes.php');
++
++use gradingform_rubric_ranges\local\validation_manager;
++use gradingform_rubric_ranges\persistent\validation_history;
++
++/**
++ * Tests of the backup and restore of weights and validation history.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \backup_gradingform_rubric_ranges_plugin
++ * @covers     \restore_gradingform_rubric_ranges_plugin
++ */
++final class backup_restore_test extends \advanced_testcase {
++    use ied_test_helper;
++
++    /**
++     * Backs up a course and restores it into a new one.
++     *
++     * @param int $courseid
++     * @param bool $users
++     * @return int new course id
++     */
++    private function backup_restore(int $courseid, bool $users): int {
++        global $CFG, $USER;
++        $bc = new \backup_controller(\backup::TYPE_1COURSE, $courseid, \backup::FORMAT_MOODLE, \backup::INTERACTIVE_NO,
++            \backup::MODE_GENERAL, $USER->id);
++        $bc->get_plan()->get_setting('users')->set_value($users);
++        $backupid = $bc->get_backupid();
++        $bc->execute_plan();
++        $file = $bc->get_results()['backup_destination'];
++        $file->extract_to_pathname(get_file_packer('application/vnd.moodle.backup'), $CFG->tempdir . '/backup/' . $backupid);
++        $bc->destroy();
++        $newcourseid = \restore_dbops::create_new_course('Restored', 'RST' . random_string(6), 1);
++        $rc = new \restore_controller($backupid, $newcourseid, \backup::INTERACTIVE_NO, \backup::MODE_GENERAL, $USER->id,
++            \backup::TARGET_NEW_COURSE);
++        $rc->get_plan()->get_setting('users')->set_value($users);
++        $rc->execute_precheck();
++        $rc->execute_plan();
++        $rc->destroy();
++        return $newcourseid;
++    }
++
++    /**
++     * Rubric controller and course module of the only assignment of a course.
++     *
++     * @param int $courseid
++     * @return array
++     */
++    private function controller_of(int $courseid): array {
++        $cm = array_values(get_fast_modinfo($courseid)->get_instances_of('assign'))[0];
++        $manager = get_grading_manager(\context_module::instance($cm->id), 'mod_assign', 'submissions');
++        return [$manager->get_controller('rubric_ranges'), $cm];
++    }
++
++    /**
++     * Weights and history are restored and remapped; without user data only the weights.
++     */
++    public function test_backup_restore(): void {
++        $this->resetAfterTest();
++        $this->set_flags(true, true, true);
++        [$course, , , $controller, $assign] = $this->create_assign_with_rubric(null, ['C1' => 3, 'C2' => 1]);
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $validator = $this->create_validator($course);
++        $s1 = $this->getDataGenerator()->create_and_enrol($course, 'student');
++        $s2 = $this->getDataGenerator()->create_and_enrol($course, 'student');
++        // Real assign_grades rows: mod_assign maps the grading item id through them.
++        $grade1 = $assign->get_user_grade($s1->id, true);
++        $grade2 = $assign->get_user_grade($s2->id, true);
++        $this->grade_as($teacher, $controller, $grade1->id, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'Teacher'));
++        $this->grade_as($teacher, $controller, $grade2->id, $this->filling($ids, ['C1' => 40, 'C2' => 8], 'Teacher2'));
++        $this->grade_as($validator, $controller, $grade1->id, $this->filling($ids, ['C1' => 80, 'C2' => 10], 'Validator', true));
++        $original = validation_manager::get_history($grade1->id)[$ids['C1']];
++
++        $this->setAdminUser();
++        $newcourseid = $this->backup_restore($course->id, true);
++        role_assign($this->get_validator_role(), $validator->id, \context_course::instance($newcourseid)->id);
++        [$newcontroller, $newcm] = $this->controller_of($newcourseid);
++        $newids = $this->criterion_ids($newcontroller);
++        $newdefinition = $newcontroller->get_definition(true);
++        $this->assertSame(3, $newdefinition->rubric_criteria[$newids['C1']]['weight']);
++        $this->assertSame(1, $newdefinition->rubric_criteria[$newids['C2']]['weight']);
++
++        $newassign = new \assign(\context_module::instance($newcm->id), $newcm, get_course($newcourseid));
++        $newgrade1 = $newassign->get_user_grade($s1->id, false);
++        $newgrade2 = $newassign->get_user_grade($s2->id, false);
++        $history = validation_manager::get_history($newgrade1->id);
++        $this->assertCount(2, $history);
++        $row = $history[$newids['C1']];
++        $levels = $newdefinition->rubric_criteria[$newids['C1']]['levels'];
++        $this->assertSame('Buen dominio conceptual', $levels[$row->get('teacherlevelid')]['definition']);
++        $this->assertSame('Exc', $levels[$row->get('validatedlevelid')]['definition']);
++        $this->assertSame(65, $row->get('teachergrade'));
++        $this->assertSame(80, $row->get('validatedgrade'));
++        $this->assertSame('Teacher', $row->get('teacherremark'));
++        $this->assertSame('Validator', $row->get('validatedremark'));
++        $this->assertEquals($original->get('timevalidated'), $row->get('timevalidated'));
++        $this->assertEquals($teacher->id, $row->get('teacherid'));
++        $this->assertEquals($validator->id, $row->get('validatorid'));
++
++        $this->assertSame(validation_manager::STATE_VALIDATED, validation_manager::get_state(
++            $newcontroller->get_or_create_instance(0, get_admin()->id, $newgrade1->id), (int) $validator->id));
++        $this->assertSame(validation_manager::STATE_PENDING, validation_manager::get_state(
++            $newcontroller->get_or_create_instance(0, $validator->id, $newgrade2->id), (int) $validator->id));
++
++        // Without user data: weights yes, history no.
++        $nousersid = $this->backup_restore($course->id, false);
++        [$nucontroller] = $this->controller_of($nousersid);
++        $nudefinition = $nucontroller->get_definition(true);
++        $this->assertSame(['C1' => 3, 'C2' => 1], array_column($nudefinition->rubric_criteria, 'weight', 'description'));
++        [$insql, $params] = $GLOBALS['DB']->get_in_or_equal(array_keys($nudefinition->rubric_criteria));
++        $this->assertSame(0, validation_history::count_records_select("criterionid $insql", $params));
++    }
++}
+diff --git a/tests/event/grade_validated_test.php b/tests/event/grade_validated_test.php
+new file mode 100644
+index 0000000..c5c9169
+--- /dev/null
++++ b/tests/event/grade_validated_test.php
+@@ -0,0 +1,73 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\event;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once(__DIR__ . '/../ied_test_helper.php');
++
++/**
++ * Tests of the grade_validated event.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\event\grade_validated
++ */
++final class grade_validated_test extends \advanced_testcase {
++    use \gradingform_rubric_ranges\ied_test_helper;
++
++    /**
++     * The event carries the validator, the context, the item and the teacher.
++     */
++    public function test_triggered_on_validation(): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$course, , $context, $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $validator = $this->create_validator($course);
++        $this->grade_as($teacher, $controller, 900, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T'));
++
++        $sink = $this->redirectEvents();
++        $this->grade_as($validator, $controller, 900, $this->filling($ids, ['C1' => 80, 'C2' => 7], 'V', true));
++        $events = array_values(array_filter($sink->get_events(), fn($e) => $e instanceof grade_validated));
++        $sink->close();
++
++        $this->assertCount(1, $events);
++        $event = $events[0];
++        $this->assertEquals($validator->id, $event->userid);
++        $this->assertEquals($context->id, $event->contextid);
++        $this->assertEquals('gradingform_rubric_ranges_h', $event->objecttable);
++        $this->assertSame(900, $event->other['itemid']);
++        $this->assertSame(2, $event->other['criteria']);
++        $this->assertEquals($teacher->id, $event->other['teacherid']);
++        $this->assertStringContainsString("validated the grade of the grading item with id '900'", $event->get_description());
++        $this->assertEventContextNotUsed($event);
++    }
++
++    /**
++     * The other values are mandatory.
++     */
++    public function test_validate_data(): void {
++        $this->resetAfterTest();
++        $course = $this->getDataGenerator()->create_course();
++        $this->expectException(\coding_exception::class);
++        grade_validated::create(['context' => \context_course::instance($course->id), 'objectid' => 1, 'other' => ['itemid' => 1]]);
++    }
++}
+diff --git a/tests/ied_test_helper.php b/tests/ied_test_helper.php
+new file mode 100644
+index 0000000..7253176
+--- /dev/null
++++ b/tests/ied_test_helper.php
+@@ -0,0 +1,179 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once($CFG->dirroot . '/grade/grading/lib.php');
++require_once($CFG->dirroot . '/grade/grading/form/rubric_ranges/lib.php');
++require_once($CFG->dirroot . '/mod/assign/locallib.php');
++
++/**
++ * Shared setup for the IED extension tests (the upstream generator is not modified).
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++trait ied_test_helper {
++
++    /** @var array Default rubric: C1 is ranged, C2 is not. */
++    protected static $defaultcriteria = [
++        ['name' => 'C1', 'isranged' => 1, 'levels' => ['Insuf' => 50, 'Suf' => 60, 'Buen dominio conceptual' => 70, 'Exc' => 100]],
++        ['name' => 'C2', 'isranged' => 0, 'levels' => ['Bad' => 5, 'Good' => 10]],
++    ];
++
++    /**
++     * Sets the IED feature flags.
++     *
++     * @param bool $weighting
++     * @param bool $numeric
++     * @param bool $validation
++     */
++    protected function set_flags(bool $weighting, bool $numeric, bool $validation): void {
++        set_config('enableweighting', (int) $weighting, 'gradingform_rubric_ranges');
++        set_config('enablenumericgrading', (int) $numeric, 'gradingform_rubric_ranges');
++        set_config('enablevalidation', (int) $validation, 'gradingform_rubric_ranges');
++    }
++
++    /**
++     * Creates a course with an assignment (max grade 100) graded with a ranged rubric.
++     *
++     * @param array|null $criteria criteria for the generator, the default rubric when null
++     * @param array $weights criterion name => weight
++     * @return array [course, cm, context, controller, assign]
++     */
++    protected function create_assign_with_rubric(?array $criteria = null, array $weights = []): array {
++        // The upstream generator must run as a user.
++        $this->setAdminUser();
++        $generator = $this->getDataGenerator();
++        $course = $generator->create_course();
++        $assignrecord = $generator->create_module('assign', ['course' => $course->id, 'grade' => 100]);
++        $cm = get_coursemodule_from_instance('assign', $assignrecord->id);
++        $context = \context_module::instance($cm->id);
++        $controller = $generator->get_plugin_generator('gradingform_rubric_ranges')
++            ->create_instance($context, 'mod_assign', 'submissions', 'Rubric', 'Description', $criteria ?? self::$defaultcriteria);
++        get_grading_manager($context, 'mod_assign', 'submissions')->set_active_method('rubric_ranges');
++        if ($weights) {
++            $data = $controller->get_definition_for_editing();
++            foreach ($data->rubricranges['criteria'] as $id => $criterion) {
++                if (isset($weights[$criterion['description']])) {
++                    $data->rubricranges['criteria'][$id]['weight'] = $weights[$criterion['description']];
++                }
++            }
++            $controller->update_definition($data);
++        }
++        // Done by mod_assign when it loads the grading form.
++        $controller->set_grade_range(make_grades_menu(100), true);
++        $assign = new \assign($context, $cm, $course);
++        return [$course, $cm, $context, $controller, $assign];
++    }
++
++    /**
++     * Returns the criterion ids of a rubric keyed by description.
++     *
++     * @param \gradingform_rubric_ranges_controller $controller
++     * @return int[]
++     */
++    protected function criterion_ids(\gradingform_rubric_ranges_controller $controller): array {
++        $ids = [];
++        foreach ($controller->get_definition(true)->rubric_criteria as $id => $criterion) {
++            $ids[$criterion['description']] = $id;
++        }
++        return $ids;
++    }
++
++    /**
++     * Returns the id of the level of a criterion with the given definition.
++     *
++     * @param array $criterion
++     * @param string $definition
++     * @return int
++     */
++    protected function level_id(array $criterion, string $definition): int {
++        foreach ($criterion['levels'] as $id => $level) {
++            if ($level['definition'] === $definition) {
++                return (int) $id;
++            }
++        }
++        throw new \coding_exception("Level '$definition' not found");
++    }
++
++    /**
++     * Creates a user with the validator role (validate capability) in the course.
++     *
++     * @param \stdClass $course
++     * @return \stdClass
++     */
++    protected function create_validator(\stdClass $course): \stdClass {
++        $validator = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $roleid = $this->get_validator_role();
++        role_assign($roleid, $validator->id, \context_course::instance($course->id)->id);
++        return $validator;
++    }
++
++    /**
++     * Returns the id of a role granting the validate capability, creating it once.
++     *
++     * @return int
++     */
++    protected function get_validator_role(): int {
++        global $DB;
++        if ($roleid = $DB->get_field('role', 'id', ['shortname' => 'iedvalidator'])) {
++            return (int) $roleid;
++        }
++        $roleid = create_role('Validator', 'iedvalidator', '');
++        assign_capability('gradingform/rubric_ranges:validate', CAP_ALLOW, $roleid, \context_system::instance()->id);
++        return (int) $roleid;
++    }
++
++    /**
++     * Builds the submitted value of the grading element.
++     *
++     * @param array $ids criterion ids keyed by description
++     * @param array $grades criterion description => grade
++     * @param string $remark remark for every criterion
++     * @param bool $validate whether the submission is a validation
++     * @return array
++     */
++    protected function filling(array $ids, array $grades, string $remark = '', bool $validate = false): array {
++        $data = ['criteria' => []];
++        foreach ($grades as $description => $grade) {
++            $data['criteria'][$ids[$description]] = ['grade' => (string) $grade, 'remark' => $remark];
++        }
++        if ($validate) {
++            $data['validate'] = 1;
++        }
++        return $data;
++    }
++
++    /**
++     * Grades an item as the given user, as mod_assign does.
++     *
++     * @param \stdClass $user
++     * @param \gradingform_rubric_ranges_controller $controller
++     * @param int $itemid
++     * @param array $data submitted value of the grading element
++     * @return float|int
++     */
++    protected function grade_as(\stdClass $user, \gradingform_rubric_ranges_controller $controller, int $itemid, array $data) {
++        $this->setUser($user);
++        return $controller->get_or_create_instance(0, $user->id, $itemid)->submit_and_get_grade($data, $itemid);
++    }
++}
+diff --git a/tests/local/grade_calculator_test.php b/tests/local/grade_calculator_test.php
+new file mode 100644
+index 0000000..777eac2
+--- /dev/null
++++ b/tests/local/grade_calculator_test.php
+@@ -0,0 +1,177 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++/**
++ * Tests of the final grade calculation.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\local\grade_calculator
++ */
++final class grade_calculator_test extends \basic_testcase {
++
++    /**
++     * C1: ranged, max 100, weight 3. C2: not ranged, max 10, weight 1.
++     *
++     * @return array
++     */
++    private static function criteria(): array {
++        $level = fn($id, $score) => ['id' => $id, 'score' => $score, 'definition' => "L$score"];
++        return [
++            1 => ['isranged' => 1, 'weight' => 3,
++                'levels' => [11 => $level(11, 50), 12 => $level(12, 60), 13 => $level(13, 70), 14 => $level(14, 100)]],
++            2 => ['isranged' => 0, 'weight' => 1, 'levels' => [21 => $level(21, 5), 22 => $level(22, 10)]],
++        ];
++    }
++
++    /**
++     * C1 graded 65 (level 61-70), C2 graded 2 (level 0-5).
++     *
++     * @return array
++     */
++    private static function filling(): array {
++        return ['criteria' => [1 => ['levelid' => 13, 'grade' => 65], 2 => ['levelid' => 21, 'grade' => 2]]];
++    }
++
++    /**
++     * Independent reference of the upstream formula (gradingform_rubric_ranges_instance::get_grade at 2aece39).
++     *
++     * @param array $criteria
++     * @param array $filling
++     * @param bool $lock
++     * @param array $range
++     * @return float
++     */
++    private static function upstream(array $criteria, array $filling, bool $lock, array $range): float {
++        $min = $max = $cur = 0;
++        foreach ($criteria as $c) {
++            $scores = array_column($c['levels'], 'score');
++            $min += min($scores);
++            $max += max($scores);
++        }
++        foreach ($filling['criteria'] as $id => $r) {
++            $cur += $criteria[$id]['isranged'] ? $r['grade'] : $criteria[$id]['levels'][$r['levelid']]['score'];
++        }
++        sort($range);
++        $mingrade = $range[0];
++        $maxgrade = end($range);
++        if ($lock) {
++            return max($mingrade, $cur / $max * $maxgrade);
++        }
++        return ($cur - $min) / ($max - $min) * ($maxgrade - $mingrade) + $mingrade;
++    }
++
++    /**
++     * Data provider for {@see test_calculate()}.
++     *
++     * @return array
++     */
++    public static function calculate_provider(): array {
++        return [
++            'weighting + numeric, lock (example)' => [true, true, 1, 53.75],
++            'weighting + numeric, no lock (min 0)' => [true, true, 0, 53.75],
++            'numeric only' => [false, true, 1, 6700 / 110],
++            'weighting only, lock' => [true, false, 1, 61.25],
++            'weighting only, no lock' => [true, false, 0, 22.5],
++        ];
++    }
++
++    /**
++     * Weighted and numeric calculations.
++     *
++     * @dataProvider calculate_provider
++     * @param bool $weighting
++     * @param bool $numeric
++     * @param int $lock
++     * @param float $expected
++     */
++    public function test_calculate(bool $weighting, bool $numeric, int $lock, float $expected): void {
++        $grade = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
++            true, $weighting, $numeric);
++        $this->assertEqualsWithDelta($expected, $grade, 0.001);
++    }
++
++    /**
++     * With every feature disabled the result is the upstream formula.
++     */
++    public function test_all_off_is_upstream(): void {
++        foreach ([1, 0] as $lock) {
++            $this->assertEqualsWithDelta(self::upstream(self::criteria(), self::filling(), (bool) $lock, range(0, 100)),
++                grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
++                    true, false, false), 0.001);
++        }
++    }
++
++    /**
++     * Equal weights equal upstream only when every criterion has the same min and max.
++     */
++    public function test_equal_weights_equivalence(): void {
++        $level = fn($id, $score) => ['id' => $id, 'score' => $score, 'definition' => "L$score"];
++        $same = [
++            1 => ['isranged' => 0, 'weight' => 4, 'levels' => [11 => $level(11, 0), 12 => $level(12, 50), 13 => $level(13, 100)]],
++            2 => ['isranged' => 0, 'weight' => 4, 'levels' => [21 => $level(21, 0), 22 => $level(22, 100)]],
++        ];
++        $filling = ['criteria' => [1 => ['levelid' => 12, 'grade' => null], 2 => ['levelid' => 22, 'grade' => null]]];
++        foreach ([1, 0] as $lock) {
++            $this->assertEqualsWithDelta(self::upstream($same, $filling, (bool) $lock, range(0, 100)),
++                grade_calculator::calculate($same, $filling, ['lockzeropoints' => $lock], range(0, 100), true, true, false), 0.001);
++        }
++        $diffmin = $same;
++        $diffmin[2]['levels'] = [21 => $level(21, 20), 22 => $level(22, 100)];
++        $this->assertNotEqualsWithDelta(self::upstream($diffmin, $filling, false, range(0, 100)),
++            grade_calculator::calculate($diffmin, $filling, ['lockzeropoints' => 0], range(0, 100), true, true, false), 0.001);
++    }
++
++    /**
++     * Rounding and scales work as upstream.
++     */
++    public function test_rounding_and_scales(): void {
++        $this->assertEquals(54, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
++            range(0, 100), false, true, true));
++        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
++            range(1, 5), false, true, true));
++        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0],
++            range(1, 5), false, true, true));
++    }
++
++    /**
++     * Criteria that cannot be normalised are left out; criteria without filling count 0.
++     */
++    public function test_excluded_and_missing_criteria(): void {
++        $base = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0], range(0, 100),
++            true, true, false);
++        $flat = self::criteria();
++        $flat[3] = ['isranged' => 0, 'weight' => 10, 'levels' => [31 => ['score' => 7], 32 => ['score' => 7]]];
++        $filling = self::filling();
++        $filling['criteria'][3] = ['levelid' => 31, 'grade' => null];
++        $this->assertEqualsWithDelta($base, grade_calculator::calculate($flat, $filling, ['lockzeropoints' => 0],
++            range(0, 100), true, true, false), 0.001);
++
++        $missing = ['criteria' => [1 => self::filling()['criteria'][1]]];
++        $this->assertEqualsWithDelta(48.75, grade_calculator::calculate(self::criteria(), $missing, ['lockzeropoints' => 1],
++            range(0, 100), true, true, true), 0.001);
++
++        $this->assertEquals(-1, grade_calculator::calculate([3 => ['isranged' => 0, 'weight' => 1,
++            'levels' => [31 => ['score' => 0], 32 => ['score' => 0]]]], $filling, ['lockzeropoints' => 1],
++            range(0, 100), true, true, false));
++        $this->assertEquals(-1, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
++            [], true, true, true));
++    }
++}
+diff --git a/tests/local/range_resolver_test.php b/tests/local/range_resolver_test.php
+new file mode 100644
+index 0000000..ee3e8c3
+--- /dev/null
++++ b/tests/local/range_resolver_test.php
+@@ -0,0 +1,160 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++/**
++ * Tests of the ranges of the numeric grading.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\local\range_resolver
++ */
++final class range_resolver_test extends \basic_testcase {
++
++    /** @var array Criterion with levels 50, 60, 70 and 100 (ids 11 to 14). */
++    private const CRITERION = ['levels' => [
++        11 => ['score' => 50, 'definition' => 'Insuf'],
++        12 => ['score' => 60, 'definition' => 'Suf'],
++        13 => ['score' => 70, 'definition' => 'Buen dominio conceptual'],
++        14 => ['score' => 100, 'definition' => 'Exc'],
++    ]];
++
++    /**
++     * Ranges follow the upstream semantics.
++     */
++    public function test_ranges_for_criterion(): void {
++        $ranges = range_resolver::ranges_for_criterion(self::CRITERION);
++        $this->assertSame([11, 12, 13, 14], array_keys($ranges));
++        $this->assertSame(['0-50', '51-60', '61-70', '71-100'],
++            array_map(fn($r) => $r['min'] . '-' . $r['max'], array_values($ranges)));
++    }
++
++    /**
++     * Ranges do not depend on the display order of the levels.
++     */
++    public function test_ranges_descending_order(): void {
++        $criterion = self::CRITERION;
++        $criterion['levels'] = array_reverse($criterion['levels'], true);
++        $this->assertEquals(range_resolver::ranges_for_criterion(self::CRITERION),
++            range_resolver::ranges_for_criterion($criterion));
++    }
++
++    /**
++     * Data provider for {@see test_level_for_grade()}.
++     *
++     * @return array
++     */
++    public static function level_for_grade_provider(): array {
++        return [
++            'zero' => [0, 11],
++            'top of first range' => [50, 11],
++            'bottom of second range' => [51, 12],
++            'example 65' => [65, 13],
++            'maximum' => [100, 14],
++            'over the maximum' => [101, null],
++        ];
++    }
++
++    /**
++     * The level is the one whose range contains the grade.
++     *
++     * @dataProvider level_for_grade_provider
++     * @param int $grade
++     * @param int|null $expected
++     */
++    public function test_level_for_grade(int $grade, ?int $expected): void {
++        $this->assertSame($expected, range_resolver::level_for_grade(self::CRITERION, $grade));
++    }
++
++    /**
++     * Levels with decimal scores still get consistent ranges.
++     */
++    public function test_decimal_scores(): void {
++        $criterion = ['levels' => [1 => ['score' => 2.5], 2 => ['score' => 5]]];
++        $this->assertSame(1, range_resolver::level_for_grade($criterion, 2));
++        $this->assertSame(2, range_resolver::level_for_grade($criterion, 3));
++    }
++
++    /**
++     * Data provider for {@see test_is_valid_grade()}.
++     *
++     * @return array
++     */
++    public static function is_valid_grade_provider(): array {
++        return [
++            ['65', true], ['0', true], ['100', true], [' 65 ', true],
++            ['65.5', false], ['101', false], ['-1', false], ['abc', false], ['', false],
++        ];
++    }
++
++    /**
++     * Only integers from 0 to the maximum are valid.
++     *
++     * @dataProvider is_valid_grade_provider
++     * @param string $value
++     * @param bool $expected
++     */
++    public function test_is_valid_grade(string $value, bool $expected): void {
++        $this->assertSame($expected, range_resolver::is_valid_grade(self::CRITERION, $value));
++    }
++
++    /**
++     * The stored grade counts when it is consistent with the stored level, the level score otherwise.
++     */
++    public function test_effective_grade(): void {
++        $this->assertSame(65.0, range_resolver::effective_grade(self::CRITERION, ['levelid' => 13, 'grade' => 65]));
++        // Fillings saved before the numeric grading was enabled.
++        $this->assertSame(70.0, range_resolver::effective_grade(self::CRITERION, ['levelid' => 13, 'grade' => null]));
++        $this->assertSame(70.0, range_resolver::effective_grade(self::CRITERION, ['levelid' => 13, 'grade' => 0]));
++        $this->assertNull(range_resolver::effective_grade(self::CRITERION, ['levelid' => null, 'grade' => 65]));
++    }
++
++    /**
++     * Every criterion goes from 0 to its maximum.
++     */
++    public function test_min_max_score(): void {
++        $other = ['levels' => [21 => ['score' => 5], 22 => ['score' => 10]]];
++        $this->assertEquals(['minscore' => 0, 'maxscore' => 110], range_resolver::min_max_score([self::CRITERION, $other]));
++    }
++
++    /**
++     * Submitted fillings are validated per criterion; criteria without grade are validated as upstream.
++     */
++    public function test_validate_filling(): void {
++        $other = ['levels' => [21 => ['score' => 5], 22 => ['score' => 10]]];
++        $criteria = [1 => self::CRITERION, 2 => $other];
++        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['grade' => '2']]]));
++        $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '101'], 2 => ['grade' => '2']]]));
++        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['levelid' => 22]]]));
++        $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => []]]));
++        $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65']]]));
++    }
++
++    /**
++     * The server decides the level from the grade and empty grades never reach the integer column.
++     */
++    public function test_normalise_filling(): void {
++        $criteria = [1 => self::CRITERION];
++        $data = range_resolver::normalise_filling($criteria, ['criteria' => [1 => ['grade' => '65', 'levelid' => 14]]]);
++        $this->assertSame(65, $data['criteria'][1]['grade']);
++        $this->assertSame(13, $data['criteria'][1]['levelid']);
++        $data = range_resolver::normalise_filling($criteria, ['criteria' => [1 => ['grade' => ' ', 'levelid' => 14]]]);
++        $this->assertArrayNotHasKey('grade', $data['criteria'][1]);
++    }
++}
+diff --git a/tests/local/validation_manager_test.php b/tests/local/validation_manager_test.php
+new file mode 100644
+index 0000000..bd97a93
+--- /dev/null
++++ b/tests/local/validation_manager_test.php
+@@ -0,0 +1,208 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once(__DIR__ . '/../ied_test_helper.php');
++
++use gradingform_rubric_ranges\persistent\validation_history;
++
++/**
++ * Tests of the academic validation.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\local\validation_manager
++ * @covers     \gradingform_rubric_ranges_instance
++ */
++final class validation_manager_test extends \advanced_testcase {
++    use \gradingform_rubric_ranges\ied_test_helper;
++
++    /** @var \stdClass */
++    private $course;
++    /** @var \gradingform_rubric_ranges_controller */
++    private $controller;
++    /** @var int[] criterion ids by description */
++    private $ids;
++    /** @var \stdClass */
++    private $teacher;
++    /** @var \stdClass */
++    private $validator;
++
++    /**
++     * Course with numeric grading and validation, a teacher and a validator.
++     */
++    protected function setUp(): void {
++        parent::setUp();
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$this->course, , , $this->controller] = $this->create_assign_with_rubric();
++        $this->ids = $this->criterion_ids($this->controller);
++        $this->teacher = $this->getDataGenerator()->create_and_enrol($this->course, 'editingteacher',
++            ['firstname' => 'Tea', 'lastname' => 'Cher']);
++        $this->validator = $this->create_validator($this->course);
++    }
++
++    /**
++     * Returns a new instance of the item for the user (as the grading form does).
++     *
++     * @param \stdClass $user
++     * @param int $itemid
++     * @return \gradingform_rubric_ranges_instance
++     */
++    private function instance_for(\stdClass $user, int $itemid): \gradingform_rubric_ranges_instance {
++        $this->setUser($user);
++        return $this->controller->get_or_create_instance(0, $user->id, $itemid);
++    }
++
++    /**
++     * Current filling of the item.
++     *
++     * @param int $itemid
++     * @return array
++     */
++    private function current_filling(int $itemid): array {
++        return $this->instance_for(get_admin(), $itemid)->get_current_instance()->get_rubric_filling(true)['criteria'];
++    }
++
++    /**
++     * States for teacher, validator and site admin; only the validator sees a pending grade.
++     */
++    public function test_states(): void {
++        $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
++        $instance = $this->instance_for($this->validator, 900);
++        $this->assertSame(validation_manager::STATE_PENDING, validation_manager::get_state($instance, (int) $this->validator->id));
++        $this->assertSame(validation_manager::STATE_NORMAL, validation_manager::get_state($instance, (int) $this->teacher->id));
++        // Site admins are not validators by default.
++        $this->assertSame(validation_manager::STATE_NORMAL, validation_manager::get_state($instance, (int) get_admin()->id));
++        $this->assertTrue($instance->validate_grading_element(['criteria' => []]));
++
++        $this->set_flags(false, true, false);
++        $this->assertSame(validation_manager::STATE_OFF, validation_manager::get_state($instance, (int) $this->validator->id));
++    }
++
++    /**
++     * Saving without validating keeps the teacher grade and discards the validator copy.
++     */
++    public function test_save_without_validate(): void {
++        global $DB;
++        $grade = $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
++        $copy = $this->instance_for($this->validator, 900);
++        $result = $copy->submit_and_get_grade($this->filling($this->ids, ['C1' => 99, 'C2' => 9], 'X'), 900);
++        $this->assertEqualsWithDelta($grade, $result, 0.001);
++        $this->assertFalse(validation_manager::is_validated(900));
++        $this->assertFalse($DB->record_exists('grading_instances', ['id' => $copy->get_id()]));
++        $this->assertEquals($this->teacher->id,
++            $DB->get_field_select('grading_instances', 'raterid', 'itemid = 900 AND status = 1'));
++        $this->assertEquals(65, $this->current_filling(900)[$this->ids['C1']]['grade']);
++    }
++
++    /**
++     * A validation replaces the teacher grade and feedback and keeps the original in the history.
++     */
++    public function test_validate(): void {
++        $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T1'));
++        $this->setUser($this->validator);
++        $sink = $this->redirectEvents();
++        $grade = $this->grade_as($this->validator, $this->controller, 900,
++            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V1', true));
++        $events = array_filter($sink->get_events(), fn($e) => $e instanceof \gradingform_rubric_ranges\event\grade_validated);
++        $sink->close();
++        $this->assertEqualsWithDelta(8700 / 110, $grade, 0.001);
++        $this->assertCount(1, $events);
++
++        $history = validation_manager::get_history(900);
++        $this->assertCount(2, $history);
++        $definition = $this->controller->get_definition();
++        $c1 = $definition->rubric_criteria[$this->ids['C1']];
++        $row = $history[$this->ids['C1']];
++        $this->assertSame(65, $row->get('teachergrade'));
++        $this->assertSame($this->level_id($c1, 'Buen dominio conceptual'), $row->get('teacherlevelid'));
++        $this->assertSame('T1', $row->get('teacherremark'));
++        $this->assertEquals($this->teacher->id, $row->get('teacherid'));
++        $this->assertSame(80, $row->get('validatedgrade'));
++        $this->assertSame($this->level_id($c1, 'Exc'), $row->get('validatedlevelid'));
++        $this->assertSame('V1', $row->get('validatedremark'));
++        $this->assertEquals($this->validator->id, $row->get('validatorid'));
++        $this->assertGreaterThan(0, $row->get('timevalidated'));
++
++        $filling = $this->current_filling(900);
++        $this->assertEquals(80, $filling[$this->ids['C1']]['grade']);
++        $this->assertSame('V1', $filling[$this->ids['C1']]['remark']);
++        $this->assertSame(validation_manager::STATE_VALIDATED,
++            validation_manager::get_state($this->instance_for($this->teacher, 900), (int) $this->teacher->id));
++    }
++
++    /**
++     * Once validated, nobody can change the grade, not even with an empty form.
++     */
++    public function test_validated_is_locked(): void {
++        $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
++        $validated = $this->grade_as($this->validator, $this->controller, 900,
++            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true));
++        $again = $this->grade_as($this->validator, $this->controller, 900,
++            $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z', true));
++        $this->assertEqualsWithDelta($validated, $again, 0.001);
++        $this->assertCount(2, validation_manager::get_history(900));
++        $teacher = $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z'));
++        $this->assertEqualsWithDelta($validated, $teacher, 0.001);
++        $empty = $this->grade_as($this->teacher, $this->controller, 900, ['criteria' => []]);
++        $this->assertEqualsWithDelta($validated, $empty, 0.001);
++        $this->assertEquals(80, $this->current_filling(900)[$this->ids['C1']]['grade']);
++    }
++
++    /**
++     * A validator cannot give the first grade.
++     */
++    public function test_not_graded(): void {
++        global $DB;
++        $instance = $this->instance_for($this->validator, 901);
++        $this->assertSame(validation_manager::STATE_NOT_GRADED,
++            validation_manager::get_state($instance, (int) $this->validator->id));
++        $this->assertEquals(-1, $instance->submit_and_get_grade($this->filling($this->ids, ['C1' => 50, 'C2' => 5]), 901));
++        $this->assertFalse($DB->record_exists_select('grading_instances', 'itemid = 901 AND status = 1'));
++    }
++
++    /**
++     * A grader with the validate capability cannot validate their own grade.
++     */
++    public function test_no_self_validation(): void {
++        $this->grade_as($this->teacher, $this->controller, 902, $this->filling($this->ids, ['C1' => 30, 'C2' => 3], 'S'));
++        role_assign($this->get_validator_role(), $this->teacher->id, \context_course::instance($this->course->id)->id);
++        $instance = $this->instance_for($this->teacher, 902);
++        $this->assertSame(validation_manager::STATE_SELF, validation_manager::get_state($instance, (int) $this->teacher->id));
++    }
++
++    /**
++     * Deleting the definition or a criterion deletes the history.
++     */
++    public function test_delete(): void {
++        $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
++        $this->grade_as($this->validator, $this->controller, 900, $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true));
++        $this->setAdminUser();
++        $data = $this->controller->get_definition_for_editing();
++        unset($data->rubricranges['criteria'][$this->ids['C2']]);
++        $this->controller->update_definition($data);
++        $this->assertSame(0, validation_history::count_records(['criterionid' => $this->ids['C2']]));
++        $this->assertSame(1, validation_history::count_records(['criterionid' => $this->ids['C1']]));
++        $this->controller->delete_definition();
++        $this->assertSame(0, validation_history::count_records());
++    }
++}
+diff --git a/tests/local/weights_test.php b/tests/local/weights_test.php
+new file mode 100644
+index 0000000..9cfe0ac
+--- /dev/null
++++ b/tests/local/weights_test.php
+@@ -0,0 +1,175 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once(__DIR__ . '/../ied_test_helper.php');
++require_once($CFG->dirroot . '/grade/grading/form/rubric_ranges/edit_form.php');
++
++use gradingform_rubric_ranges\persistent\criterion_weight;
++
++/**
++ * Tests of the criteria weighting.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\local\weights
++ * @covers     \gradingform_rubric_ranges_controller
++ */
++final class weights_test extends \advanced_testcase {
++    use \gradingform_rubric_ranges\ied_test_helper;
++
++    /**
++     * Weights are normalised to 1-10.
++     */
++    public function test_clamp(): void {
++        $this->assertSame(1, weights::clamp('abc'));
++        $this->assertSame(1, weights::clamp(0));
++        $this->assertSame(10, weights::clamp(99));
++        $this->assertSame(4, weights::clamp('4'));
++    }
++
++    /**
++     * Percentages over the total weight.
++     */
++    public function test_percentages(): void {
++        $this->assertEquals([1 => 75.0, 2 => 25.0], weights::percentages([1 => ['weight' => 3], 2 => ['weight' => 1]]));
++        $this->assertEquals([1 => 50.0, 2 => 50.0], weights::percentages([1 => [], 2 => []]));
++    }
++
++    /**
++     * Existing rubrics weigh 1 without stored rows; weights are saved, loaded and change the rubric at level 3.
++     */
++    public function test_save_load_and_change_level(): void {
++        $this->resetAfterTest();
++        $this->setAdminUser();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $definition = $controller->get_definition(true);
++        $this->assertSame(1, $definition->rubric_criteria[$ids['C1']]['weight']);
++        $this->assertFalse(criterion_weight::get_record(['criterionid' => $ids['C1']]));
++
++        $data = $controller->get_definition_for_editing();
++        $data->rubricranges['criteria'][$ids['C1']]['weight'] = 3;
++        $this->assertSame(3, $controller->update_or_check_rubric(clone $data));
++        $controller->update_definition($data);
++        $definition = $controller->get_definition(true);
++        $this->assertSame(3, $definition->rubric_criteria[$ids['C1']]['weight']);
++        $this->assertSame(1, $definition->rubric_criteria[$ids['C2']]['weight']);
++    }
++
++    /**
++     * The editor element clamps submitted weights and never adds a default one.
++     */
++    public function test_editor_prepare_data(): void {
++        $this->resetAfterTest();
++        $element = new \MoodleQuickForm_rubricrangeseditor('rubricranges');
++        $prepare = fn($value) => (function($v) {
++            return $this->prepare_data($v);
++        })->call($element, $value);
++        $data = $prepare(['criteria' => [5 => ['description' => 'x', 'weight' => 99, 'levels' => []]]]);
++        $this->assertSame(10, $data['criteria'][5]['weight']);
++        $data = $prepare(['criteria' => [5 => ['description' => 'x', 'levels' => []]]]);
++        $this->assertArrayNotHasKey('weight', $data['criteria'][5]);
++    }
++
++    /**
++     * Saving the rubric with weighting disabled (no weight submitted) keeps the configured weights.
++     */
++    public function test_flag_off_keeps_weights(): void {
++        $this->resetAfterTest();
++        $this->setAdminUser();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3]);
++        $ids = $this->criterion_ids($controller);
++        $this->set_flags(false, false, false);
++        $data = $controller->get_definition_for_editing();
++        foreach ($data->rubricranges['criteria'] as &$criterion) {
++            unset($criterion['weight']);
++        }
++        unset($criterion);
++        $data->rubricranges['criteria'][$ids['C2']]['description'] = 'C2 changed';
++        $controller->update_definition($data);
++        $this->assertSame(3, $controller->get_definition(true)->rubric_criteria[$ids['C1']]['weight']);
++    }
++
++    /**
++     * Upstream fix: a weight change with regrade marks the active instances for regrade.
++     */
++    public function test_regrade_fix(): void {
++        global $DB;
++        $this->resetAfterTest();
++        $this->setAdminUser();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $definition = $controller->get_definition(true);
++        $filling = ['criteria' => []];
++        foreach ($definition->rubric_criteria as $cid => $criterion) {
++            $filling['criteria'][$cid] = ['levelid' => array_key_first($criterion['levels']), 'remark' => '', 'grade' => 0];
++        }
++        $instance = $controller->create_instance(get_admin()->id, 123);
++        $instance->submit_and_get_grade($filling, 123);
++
++        $data = $controller->get_definition_for_editing();
++        $data->rubricranges['criteria'][$ids['C2']]['weight'] = 5;
++        $data->rubricranges['regrade'] = 1;
++        $controller->update_definition($data);
++        $this->assertEquals(\gradingform_instance::INSTANCE_STATUS_NEEDUPDATE,
++            $DB->get_field('grading_instances', 'status', ['id' => $instance->get_id()]));
++    }
++
++    /**
++     * Copying the rubric to another area copies the weights.
++     */
++    public function test_definition_copy(): void {
++        $this->resetAfterTest();
++        $this->setAdminUser();
++        $this->set_flags(true, false, false);
++        [$course, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3, 'C2' => 5]);
++        $assign = $this->getDataGenerator()->create_module('assign', ['course' => $course->id]);
++        $manager = get_grading_manager(\context_module::instance($assign->cmid), 'mod_assign', 'submissions');
++        $manager->set_active_method('rubric_ranges');
++        $target = $manager->get_controller('rubric_ranges');
++        $target->update_definition($controller->get_definition_copy($target));
++        $weights = array_column($target->get_definition(true)->rubric_criteria, 'weight', 'description');
++        $this->assertSame(['C1' => 3, 'C2' => 5], $weights);
++    }
++
++    /**
++     * Deleting a criterion or the definition deletes its weights.
++     */
++    public function test_delete(): void {
++        $this->resetAfterTest();
++        $this->setAdminUser();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3, 'C2' => 5]);
++        $ids = $this->criterion_ids($controller);
++        $data = $controller->get_definition_for_editing();
++        unset($data->rubricranges['criteria'][$ids['C2']]);
++        $controller->update_definition($data);
++        $this->assertFalse(criterion_weight::get_record(['criterionid' => $ids['C2']]));
++        $this->assertNotFalse(criterion_weight::get_record(['criterionid' => $ids['C1']]));
++        $controller->delete_definition();
++        $this->assertFalse(criterion_weight::get_record(['criterionid' => $ids['C1']]));
++    }
++}
+diff --git a/tests/numeric_grading_test.php b/tests/numeric_grading_test.php
+new file mode 100644
+index 0000000..7bb568b
+--- /dev/null
++++ b/tests/numeric_grading_test.php
+@@ -0,0 +1,92 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once(__DIR__ . '/ied_test_helper.php');
++
++/**
++ * Tests of the numeric grading in the grading instance and of the weighted final grade.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges_instance
++ * @covers     \gradingform_rubric_ranges_controller
++ */
++final class numeric_grading_test extends \advanced_testcase {
++    use ied_test_helper;
++
++    /**
++     * The server decides the level from the grade and the final grade uses a minimum of 0.
++     */
++    public function test_submit(): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, true, false);
++        [, , , $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $definition = $controller->get_definition(true);
++        $c1 = $definition->rubric_criteria[$ids['C1']];
++        $c2 = $definition->rubric_criteria[$ids['C2']];
++
++        $instance = $controller->create_instance(get_admin()->id, 777);
++        $this->assertFalse($instance->is_empty_form(['criteria' => [$ids['C1'] => ['grade' => '65'], $ids['C2'] => []]]));
++        $data = $this->filling($ids, ['C1' => 65, 'C2' => 2], 'feedback');
++        // The browser sends a wrong level: the server fixes it.
++        $data['criteria'][$ids['C1']]['levelid'] = $this->level_id($c1, 'Exc');
++        $grade = $instance->submit_and_get_grade($data, 777);
++
++        $filling = $instance->get_rubric_filling(true)['criteria'];
++        $this->assertSame($this->level_id($c1, 'Buen dominio conceptual'), (int) $filling[$ids['C1']]['levelid']);
++        $this->assertSame($this->level_id($c2, 'Bad'), (int) $filling[$ids['C2']]['levelid']);
++        $this->assertEquals(65, $filling[$ids['C1']]['grade']);
++        $this->assertEqualsWithDelta(6700 / 110, $grade, 0.001);
++        $this->assertEquals(['minscore' => 0, 'maxscore' => 110], $controller->get_min_max_score());
++    }
++
++    /**
++     * Invalid numeric grades are rejected by the form validation.
++     */
++    public function test_validate_grading_element(): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, true, false);
++        [, , , $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $instance = $controller->create_instance(get_admin()->id, 778);
++        $this->assertTrue($instance->validate_grading_element($this->filling($ids, ['C1' => 65, 'C2' => 2])));
++        $this->assertFalse($instance->validate_grading_element($this->filling($ids, ['C1' => 101, 'C2' => 2])));
++        $this->assertFalse($instance->validate_grading_element($this->filling($ids, ['C1' => '6.5', 'C2' => 2])));
++    }
++
++    /**
++     * Weighted final grade with numeric grading, also when the grade is validated.
++     */
++    public function test_weighted_grade(): void {
++        $this->resetAfterTest();
++        $this->set_flags(true, true, true);
++        [$course, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3, 'C2' => 1]);
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $validator = $this->create_validator($course);
++        $grade = $this->grade_as($teacher, $controller, 556, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T'));
++        $this->assertEqualsWithDelta(53.75, $grade, 0.001);
++        $validated = $this->grade_as($validator, $controller, 556, $this->filling($ids, ['C1' => 80, 'C2' => 10], 'V', true));
++        $this->assertEqualsWithDelta(85, $validated, 0.001);
++    }
++}
+diff --git a/tests/privacy/provider_ied_test.php b/tests/privacy/provider_ied_test.php
+new file mode 100644
+index 0000000..2076aa3
+--- /dev/null
++++ b/tests/privacy/provider_ied_test.php
+@@ -0,0 +1,180 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\privacy;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once(__DIR__ . '/../ied_test_helper.php');
++
++use core_privacy\local\request\approved_contextlist;
++use core_privacy\local\request\approved_userlist;
++use core_privacy\local\request\writer;
++use core_privacy\tests\provider_testcase;
++use gradingform_rubric_ranges\local\validation_manager;
++
++/**
++ * Privacy tests of the IED data (numeric grade, validation history and weights).
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges\privacy\provider
++ */
++final class provider_ied_test extends provider_testcase {
++    use \gradingform_rubric_ranges\ied_test_helper;
++
++    /** @var \context_module */
++    private $context;
++    /** @var int[] */
++    private $ids;
++    /** @var \stdClass */
++    private $teacher;
++    /** @var \stdClass */
++    private $validator;
++    /** @var int item of the first student */
++    private $itemid;
++    /** @var int item of the second student */
++    private $itemid2;
++
++    /**
++     * Two students graded by a teacher and validated by a validator.
++     */
++    protected function setUp(): void {
++        parent::setUp();
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$course, , $this->context, $controller, $assign] = $this->create_assign_with_rubric();
++        $this->ids = $this->criterion_ids($controller);
++        $this->teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
++        $this->validator = $this->create_validator($course);
++        $items = [];
++        foreach ([1, 2] as $n) {
++            $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
++            $itemid = (int) $assign->get_user_grade($student->id, true)->id;
++            $this->grade_as($this->teacher, $controller, $itemid, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'Teacher feedback'));
++            $this->grade_as($this->validator, $controller, $itemid,
++                $this->filling($this->ids, ['C1' => 80, 'C2' => 10], 'Validator feedback', true));
++            $items[] = $itemid;
++        }
++        [$this->itemid, $this->itemid2] = $items;
++        $this->setAdminUser();
++    }
++
++    /**
++     * The component is compliant and declares the IED tables.
++     */
++    public function test_metadata(): void {
++        $this->assertTrue((new \core_privacy\manager())->component_is_compliant('gradingform_rubric_ranges'));
++        $tables = array_map(fn($item) => $item->get_name(),
++            provider::get_metadata(new \core_privacy\local\metadata\collection('gradingform_rubric_ranges'))->get_collection());
++        $this->assertContains('gradingform_rubric_ranges_h', $tables);
++        $this->assertContains('gradingform_rubric_ranges_w', $tables);
++    }
++
++    /**
++     * The graded user gets the original and validated grades without the identity of the staff.
++     */
++    public function test_export_graded_user(): void {
++        global $DB;
++        \core_grading\privacy\provider::export_item_data($this->context, $this->itemid, ['Assign']);
++        $active = $DB->get_record_select('grading_instances', 'itemid = ? AND status = 1', [$this->itemid]);
++        $writer = writer::with_context($this->context);
++        $filling = (array) $writer->get_data(['Assign', 'Rubric', $active->id]);
++        $this->assertEquals(80, $filling['C1']->grade);
++        $validation = $writer->get_data(['Assign', 'Rubric', $active->id, 'Validation']);
++        $row = $validation->validation[0];
++        $this->assertEquals(65, $row->originalgrade);
++        $this->assertEquals(80, $row->validatedgrade);
++        $this->assertSame('Buen dominio conceptual', $row->originallevel);
++        $this->assertSame('Exc', $row->validatedlevel);
++        $this->assertSame('Teacher feedback', $row->originalfeedback);
++        $this->assertSame('Validator feedback', $row->validatedfeedback);
++        $this->assertNotEmpty($row->timevalidated);
++        $this->assertFalse(property_exists($row, 'teacherid'));
++        $this->assertFalse(property_exists($row, 'validatorid'));
++    }
++
++    /**
++     * Teacher and validator are found through the privacy manager.
++     */
++    public function test_contexts_and_users(): void {
++        $manager = new \core_privacy\manager();
++        foreach ([$this->teacher, $this->validator] as $user) {
++            $list = $manager->get_contexts_for_userid($user->id)->get_contextlist_for_component('gradingform_rubric_ranges');
++            $this->assertContains((int) $this->context->id, array_map('intval', $list->get_contextids()));
++        }
++        $userlist = new \core_privacy\local\request\userlist($this->context, 'gradingform_rubric_ranges');
++        provider::get_users_in_context($userlist);
++        $this->assertEqualsCanonicalizing([(int) $this->teacher->id, (int) $this->validator->id],
++            array_map('intval', $userlist->get_userids()));
++    }
++
++    /**
++     * The staff export lists their validations with their role and only their own feedback.
++     */
++    public function test_export_staff(): void {
++        provider::export_user_data(new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]));
++        $data = writer::with_context($this->context)->get_data(['Rubric', 'Validations']);
++        $this->assertCount(4, $data->validations);
++        $row = $data->validations[0];
++        $this->assertSame('Validator', $row->role);
++        $this->assertSame('Validator feedback', $row->validatedfeedback);
++        $this->assertNull($row->originalfeedback);
++
++        writer::reset();
++        provider::export_user_data(new approved_contextlist($this->teacher, 'gradingform_rubric_ranges', [$this->context->id]));
++        $row = writer::with_context($this->context)->get_data(['Rubric', 'Validations'])->validations[0];
++        $this->assertSame('Teacher', $row->role);
++        $this->assertSame('Teacher feedback', $row->originalfeedback);
++        $this->assertNull($row->validatedfeedback);
++    }
++
++    /**
++     * Deleting staff data anonymises them and the grade stays validated.
++     */
++    public function test_delete_staff(): void {
++        provider::delete_data_for_user(new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]));
++        $row = validation_manager::get_history($this->itemid)[$this->ids['C1']];
++        $this->assertSame(0, $row->get('validatorid'));
++        $this->assertEquals($this->teacher->id, $row->get('teacherid'));
++        $this->assertTrue(validation_manager::is_validated($this->itemid));
++
++        provider::delete_data_for_users(new approved_userlist($this->context, 'gradingform_rubric_ranges', [$this->teacher->id]));
++        $row = validation_manager::get_history($this->itemid)[$this->ids['C1']];
++        $this->assertNull($row->get('teacherid'));
++        $this->assertSame(65, $row->get('teachergrade'));
++
++        provider::delete_data_for_all_users_in_context($this->context);
++        $row = validation_manager::get_history($this->itemid2)[$this->ids['C1']];
++        $this->assertSame(0, $row->get('validatorid'));
++        $this->assertNull($row->get('teacherid'));
++        $this->assertSame(80, $row->get('validatedgrade'));
++    }
++
++    /**
++     * Deleting the graded user data removes their fillings and history only.
++     */
++    public function test_delete_graded_user(): void {
++        global $DB;
++        \core_grading\privacy\provider::delete_instance_data($this->context, $this->itemid);
++        $this->assertFalse(validation_manager::is_validated($this->itemid));
++        $this->assertSame(0, $DB->count_records_select('gradingform_rubric_ranges_f',
++            'instanceid IN (SELECT id FROM {grading_instances} WHERE itemid = ?)', [$this->itemid]));
++        $this->assertTrue(validation_manager::is_validated($this->itemid2));
++    }
++}
+diff --git a/tests/renderer_test.php b/tests/renderer_test.php
+new file mode 100644
+index 0000000..901059c
+--- /dev/null
++++ b/tests/renderer_test.php
+@@ -0,0 +1,152 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++global $CFG;
++require_once(__DIR__ . '/ied_test_helper.php');
++require_once($CFG->libdir . '/formslib.php');
++require_once('HTML/QuickForm/input.php');
++require_once($CFG->libdir . '/form/grading.php');
++
++use gradingform_rubric_ranges_controller as controller;
++
++/**
++ * Tests of the rendering of the IED extension.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges_renderer
++ * @covers     \gradingform_rubric_ranges_instance::render_grading_element
++ */
++final class renderer_test extends \advanced_testcase {
++    use ied_test_helper;
++
++    /**
++     * Renders the rubric of a controller in a mode.
++     *
++     * @param \gradingform_rubric_ranges_controller $controller
++     * @param int $mode
++     * @param array|null $values
++     * @param array $options option overrides
++     * @return string
++     */
++    private function render(\gradingform_rubric_ranges_controller $controller, int $mode, ?array $values = null,
++            array $options = []): string {
++        global $PAGE;
++        $PAGE->set_url('/');
++        $definition = $controller->get_definition(true);
++        return $controller->get_renderer($PAGE)->display_rubric($definition->rubric_criteria,
++            array_merge($controller->get_options(), $options), $mode, 'rr', $values);
++    }
++
++    /**
++     * Weights: selector when editing, summary for graders, nothing for students.
++     */
++    public function test_weights(): void {
++        $this->resetAfterTest();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3]);
++        $ids = $this->criterion_ids($controller);
++        $this->assertStringContainsString('name="rr[criteria][' . $ids['C1'] . '][weight]"',
++            $this->render($controller, controller::DISPLAY_EDIT_FULL));
++        $this->assertStringContainsString('Weight 3 · 75 %', $this->render($controller, controller::DISPLAY_REVIEW));
++        $this->assertStringNotContainsString('class="weight"', $this->render($controller, controller::DISPLAY_VIEW));
++        $this->assertMatchesRegularExpression('/type="hidden" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[weight\]" value="3"/',
++            $this->render($controller, controller::DISPLAY_EDIT_FROZEN));
++        $this->set_flags(false, false, false);
++        $this->assertStringNotContainsString('weightselect', $this->render($controller, controller::DISPLAY_EDIT_FULL));
++    }
++
++    /**
++     * Numeric grading: number input, level data attributes, ranges for every criterion and remark warning.
++     */
++    public function test_numeric(): void {
++        $this->resetAfterTest();
++        $this->set_flags(false, true, false);
++        [, , , $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $instance = $controller->create_instance(get_admin()->id, 10);
++        $instance->submit_and_get_grade($this->filling($ids, ['C1' => 65, 'C2' => 2]), 10);
++        $values = $instance->get_rubric_filling();
++
++        $eval = $this->render($controller, controller::DISPLAY_EVAL, $values);
++        $this->assertMatchesRegularExpression(
++            '/<input type="number" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[grade\]"[^>]*max="100"[^>]*value="65"/', $eval);
++        $this->assertStringNotContainsString('<select', $eval);
++        $this->assertStringContainsString('data-rangemin="61" data-rangemax="70" data-definition="Buen dominio conceptual"', $eval);
++        $this->assertStringContainsString('0 to 5', $eval);
++        $review = $this->render($controller, controller::DISPLAY_REVIEW, $values);
++        $this->assertStringContainsString('65 pts', $review);
++        $this->assertStringContainsString('feedback of the level will not be applied',
++            $this->render($controller, controller::DISPLAY_EDIT_FULL, null, ['enableremarks' => 0]));
++        // No PHP notice for the upstream $currentgrade when remarks are disabled.
++        $this->render($controller, controller::DISPLAY_EVAL_FROZEN, $values, ['enableremarks' => 0]);
++    }
++
++    /**
++     * Validation states in the grading element and in the feedback shown to graders and students.
++     */
++    public function test_validation(): void {
++        global $PAGE, $DB;
++        $this->resetAfterTest();
++        $this->set_flags(false, true, true);
++        [$course, , $context, $controller] = $this->create_assign_with_rubric();
++        $ids = $this->criterion_ids($controller);
++        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher', ['firstname' => 'Tea', 'lastname' => 'Cher']);
++        $validator = $this->create_validator($course);
++        $DB->set_field('user', 'firstname', 'Vali', ['id' => $validator->id]);
++        $DB->set_field('user', 'lastname', 'Dator', ['id' => $validator->id]);
++        foreach ([900, 903] as $itemid) {
++            $this->grade_as($teacher, $controller, $itemid, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T1'));
++        }
++        $this->grade_as($validator, $controller, 900, $this->filling($ids, ['C1' => 80, 'C2' => 7], 'V1', true));
++
++        $PAGE->set_context($context);
++        $PAGE->set_url('/');
++        $render = function(int $itemid) use ($controller, $validator) {
++            global $PAGE;
++            $instance = $controller->get_or_create_instance(0, $validator->id, $itemid);
++            $element = new \MoodleQuickForm_grading('advancedgrading', 'Grade', ['gradinginstance' => $instance]);
++            return $instance->render_grading_element($PAGE, $element);
++        };
++        $this->setUser($validator);
++        $pending = $render(903);
++        $this->assertStringContainsString('id="advancedgrading-validate-button"', $pending);
++        $this->assertStringContainsString('id="rubric-advancedgrading-review"', $pending);
++        $this->assertMatchesRegularExpression('/id="advancedgrading-validation-editable" hidden="hidden"/', $pending);
++        $this->assertStringContainsString('name="advancedgrading[validate]" id="advancedgrading-validate" value="0"', $pending);
++
++        $validated = $render(900);
++        $this->assertStringContainsString('Grade validated by Vali Dator', $validated);
++        $this->assertStringContainsString('Original grade: 65 · Buen dominio conceptual · Tea Cher', $validated);
++        $this->assertStringContainsString('Original feedback: T1', $validated);
++        $this->assertStringNotContainsString('type="number"', $validated);
++
++        $this->assertStringContainsString('has not graded yet', $render(901));
++
++        $active = $controller->get_or_create_instance(0, $validator->id, 900)->get_current_instance();
++        $renderer = $controller->get_renderer($PAGE);
++        $this->assertStringContainsString('Grade validated by', $renderer->display_instance($active, 0, true));
++        $student = $renderer->display_instance($active, 0, false);
++        $this->assertStringNotContainsString('validated', $student);
++        $this->assertStringNotContainsString('Original grade', $student);
++    }
++}
+diff --git a/tests/upstream_compat_test.php b/tests/upstream_compat_test.php
+new file mode 100644
+index 0000000..ebcbc10
+--- /dev/null
++++ b/tests/upstream_compat_test.php
+@@ -0,0 +1,96 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges;
++
++defined('MOODLE_INTERNAL') || die();
++
++require_once(__DIR__ . '/ied_test_helper.php');
++
++/**
++ * With every IED feature disabled the plugin behaves as upstream.
++ *
++ * The byte to byte comparison of the HTML with the upstream code needs both code bases, so it is a separate
++ * script (see PATCHES.md); here the absence of any IED markup is checked.
++ *
++ * @package    gradingform_rubric_ranges
++ * @category   test
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ * @covers     \gradingform_rubric_ranges_instance::get_grade
++ * @covers     \gradingform_rubric_ranges_renderer
++ */
++final class upstream_compat_test extends \advanced_testcase {
++    use ied_test_helper;
++
++    /**
++     * Data provider for {@see test_grade_is_upstream()}.
++     *
++     * @return array
++     */
++    public static function lock_provider(): array {
++        return ['lockzeropoints on' => [1], 'lockzeropoints off' => [0]];
++    }
++
++    /**
++     * The grade is the upstream formula, even with stored weights.
++     *
++     * @dataProvider lock_provider
++     * @param int $lock
++     */
++    public function test_grade_is_upstream(int $lock): void {
++        $this->resetAfterTest();
++        $this->set_flags(true, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3]);
++        $this->set_flags(false, false, false);
++        $data = $controller->get_definition_for_editing();
++        $data->rubricranges['options']['lockzeropoints'] = $lock;
++        $controller->update_definition($data);
++        $controller->set_grade_range(make_grades_menu(100), true);
++        $ids = $this->criterion_ids($controller);
++        $definition = $controller->get_definition(true);
++        $c1 = $definition->rubric_criteria[$ids['C1']];
++        $c2 = $definition->rubric_criteria[$ids['C2']];
++        $instance = $controller->create_instance(get_admin()->id, 50);
++        $grade = $instance->submit_and_get_grade(['criteria' => [
++            $ids['C1'] => ['levelid' => $this->level_id($c1, 'Buen dominio conceptual'), 'grade' => 65, 'remark' => ''],
++            $ids['C2'] => ['levelid' => $this->level_id($c2, 'Bad'), 'remark' => ''],
++        ]], 50);
++        // Upstream: C1 is ranged (grade 65), C2 counts its level score (5); min 55, max 110.
++        $expected = $lock ? 70 / 110 * 100 : (70 - 55) / (110 - 55) * 100;
++        $this->assertEqualsWithDelta($expected, $grade, 0.001);
++        $this->assertEquals(['minscore' => 55, 'maxscore' => 110], $controller->get_min_max_score());
++    }
++
++    /**
++     * No IED markup in any display mode.
++     */
++    public function test_no_ied_markup(): void {
++        global $PAGE;
++        $this->resetAfterTest();
++        $this->set_flags(false, false, false);
++        [, , , $controller] = $this->create_assign_with_rubric(null, []);
++        $PAGE->set_url('/');
++        $definition = $controller->get_definition(true);
++        $renderer = $controller->get_renderer($PAGE);
++        foreach ([1, 2, 3, 4, 5, 6, 7, 8] as $mode) {
++            $html = $renderer->display_rubric($definition->rubric_criteria, $controller->get_options(), $mode, 'rr');
++            foreach (['weightselect', 'class="weight"', 'data-rangemin', 'gradeinput', 'validate', 'class="validation"'] as $mark) {
++                $this->assertStringNotContainsString($mark, $html, "Mode $mode contains $mark");
++            }
++        }
++    }
++}
+-- 
+2.39.2.windows.1
+
