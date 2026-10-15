@@ -50,8 +50,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
             $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_levels/rubric_ranges_level'));
 
         // IED extension: criteria weights.
-        $paths[] = new restore_path_element('gradingform_rubric_ranges_weight',
-            $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_weight'));
+        $paths[] = new restore_path_element(
+            'gradingform_rubric_ranges_weight',
+            $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_weight')
+        );
 
         return $paths;
     }
@@ -69,8 +71,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
             $this->get_pathfor('/rubric_ranges_fillings/rubric_ranges_filling'));
 
         // IED extension: validation history.
-        $paths[] = new restore_path_element('gradingform_rubric_ranges_validation',
-            $this->get_pathfor('/rubric_ranges_validations/rubric_ranges_validation'));
+        $paths[] = new restore_path_element(
+            'gradingform_rubric_ranges_validation',
+            $this->get_pathfor('/rubric_ranges_validations/rubric_ranges_validation')
+        );
 
         return $paths;
     }
@@ -160,8 +164,8 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
             return;
         }
         $history = \gradingform_rubric_ranges\persistent\validation_history::class;
-        if ($history::record_exists_select('itemid = :itemid AND criterionid = :criterionid',
-                ['itemid' => $itemid, 'criterionid' => $criterionid])) {
+        $params = ['itemid' => $itemid, 'criterionid' => $criterionid];
+        if ($history::record_exists_select('itemid = :itemid AND criterionid = :criterionid', $params)) {
             // Already restored (e.g. restoring twice into the same course).
             return;
         }

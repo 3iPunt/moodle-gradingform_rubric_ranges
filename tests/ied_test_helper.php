@@ -32,7 +32,6 @@ require_once($CFG->dirroot . '/mod/assign/locallib.php');
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 trait ied_test_helper {
-
     /** @var array Default rubric: C1 is ranged, C2 is not. */
     protected static $defaultcriteria = [
         ['name' => 'C1', 'isranged' => 1, 'levels' => ['Insuf' => 50, 'Suf' => 60, 'Buen dominio conceptual' => 70, 'Exc' => 100]],

@@ -66,9 +66,14 @@ final class provider_ied_test extends provider_testcase {
         foreach ([1, 2] as $n) {
             $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
             $itemid = (int) $assign->get_user_grade($student->id, true)->id;
-            $this->grade_as($this->teacher, $controller, $itemid, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'Teacher feedback'));
-            $this->grade_as($this->validator, $controller, $itemid,
-                $this->filling($this->ids, ['C1' => 80, 'C2' => 10], 'Validator feedback', true));
+            $teachergrade = $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'Teacher feedback');
+            $this->grade_as($this->teacher, $controller, $itemid, $teachergrade);
+            $this->grade_as(
+                $this->validator,
+                $controller,
+                $itemid,
+                $this->filling($this->ids, ['C1' => 80, 'C2' => 10], 'Validator feedback', true)
+            );
             $items[] = $itemid;
         }
         [$this->itemid, $this->itemid2] = $items;
@@ -80,8 +85,10 @@ final class provider_ied_test extends provider_testcase {
      */
     public function test_metadata(): void {
         $this->assertTrue((new \core_privacy\manager())->component_is_compliant('gradingform_rubric_ranges'));
-        $tables = array_map(fn($item) => $item->get_name(),
-            provider::get_metadata(new \core_privacy\local\metadata\collection('gradingform_rubric_ranges'))->get_collection());
+        $tables = array_map(
+            fn($item) => $item->get_name(),
+            provider::get_metadata(new \core_privacy\local\metadata\collection('gradingform_rubric_ranges'))->get_collection()
+        );
         $this->assertContains('gradingform_rubric_ranges_h', $tables);
         $this->assertContains('gradingform_rubric_ranges_w', $tables);
     }
@@ -120,8 +127,10 @@ final class provider_ied_test extends provider_testcase {
         }
         $userlist = new \core_privacy\local\request\userlist($this->context, 'gradingform_rubric_ranges');
         provider::get_users_in_context($userlist);
-        $this->assertEqualsCanonicalizing([(int) $this->teacher->id, (int) $this->validator->id],
-            array_map('intval', $userlist->get_userids()));
+        $this->assertEqualsCanonicalizing(
+            [(int) $this->teacher->id, (int) $this->validator->id],
+            array_map('intval', $userlist->get_userids())
+        );
     }
 
     /**
@@ -148,7 +157,8 @@ final class provider_ied_test extends provider_testcase {
      * Deleting staff data anonymises them and the grade stays validated.
      */
     public function test_delete_staff(): void {
-        provider::delete_data_for_user(new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]));
+        $contextlist = new approved_contextlist($this->validator, 'gradingform_rubric_ranges', [$this->context->id]);
+        provider::delete_data_for_user($contextlist);
         $row = validation_manager::get_history($this->itemid)[$this->ids['C1']];
         $this->assertSame(0, $row->get('validatorid'));
         $this->assertEquals($this->teacher->id, $row->get('teacherid'));
@@ -173,8 +183,11 @@ final class provider_ied_test extends provider_testcase {
         global $DB;
         \core_grading\privacy\provider::delete_instance_data($this->context, $this->itemid);
         $this->assertFalse(validation_manager::is_validated($this->itemid));
-        $this->assertSame(0, $DB->count_records_select('gradingform_rubric_ranges_f',
-            'instanceid IN (SELECT id FROM {grading_instances} WHERE itemid = ?)', [$this->itemid]));
+        $this->assertSame(0, $DB->count_records_select(
+            'gradingform_rubric_ranges_f',
+            'instanceid IN (SELECT id FROM {grading_instances} WHERE itemid = ?)',
+            [$this->itemid]
+        ));
         $this->assertTrue(validation_manager::is_validated($this->itemid2));
     }
 }

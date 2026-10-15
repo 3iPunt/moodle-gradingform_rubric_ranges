@@ -33,7 +33,6 @@ use gradingform_rubric_ranges_instance;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 final class validation_manager {
-
     /** @var string Capability to validate grades. */
     const CAPABILITY = 'gradingform/rubric_ranges:validate';
 
@@ -183,12 +182,16 @@ final class validation_manager {
      * @param gradingform_rubric_ranges_instance $teacher instance graded by the teacher
      * @param int $validatorid
      */
-    public static function record_validation(gradingform_rubric_ranges_instance $validated,
-            gradingform_rubric_ranges_instance $teacher, int $validatorid): void {
+    public static function record_validation(
+        gradingform_rubric_ranges_instance $validated,
+        gradingform_rubric_ranges_instance $teacher,
+        int $validatorid
+    ): void {
         $controller = $validated->get_controller();
         $teacherfilling = $teacher->get_rubric_filling()['criteria'];
         $validatedfilling = $validated->get_rubric_filling(true)['criteria'];
         $itemid = (int) $validated->get_data('itemid');
+        $instanceid = (int) $validated->get_id();
         $now = time();
 
         $first = null;
@@ -197,7 +200,7 @@ final class validation_manager {
             $new = $validatedfilling[$criterionid] ?? [];
             $record = new validation_history(0, (object) [
                 'itemid' => $itemid,
-                'instanceid' => $validated->get_id(),
+                'instanceid' => $instanceid,
                 'criterionid' => $criterionid,
                 'teacherlevelid' => self::int_or_null($original['levelid'] ?? null),
                 'teachergrade' => self::int_or_null($original['grade'] ?? null),
@@ -221,7 +224,7 @@ final class validation_manager {
                 'userid' => $validatorid,
                 'other' => [
                     'itemid' => $itemid,
-                    'instanceid' => $validated->get_id(),
+                    'instanceid' => $instanceid,
                     'criteria' => count($controller->get_definition()->rubric_criteria),
                     'teacherid' => (int) $teacher->get_data('raterid'),
                 ],
@@ -269,7 +272,7 @@ final class validation_manager {
      * @return validation_history[]
      */
     public static function get_history_for_user(int $userid, array $criterionids): array {
-        return array_filter(self::get_records_in('criterionid', $criterionids), function($record) use ($userid) {
+        return array_filter(self::get_records_in('criterionid', $criterionids), function ($record) use ($userid) {
             return (int) $record->get('teacherid') === $userid || (int) $record->get('validatorid') === $userid;
         });
     }

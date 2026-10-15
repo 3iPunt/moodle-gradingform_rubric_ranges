@@ -27,7 +27,6 @@ namespace gradingform_rubric_ranges\local;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 final class features {
-
     /** @var string Plugin component used to store the flags. */
     const COMPONENT = 'gradingform_rubric_ranges';
 

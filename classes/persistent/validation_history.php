@@ -31,7 +31,6 @@ use core\persistent;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class validation_history extends persistent {
-
     /** @var string Table name. */
     const TABLE = 'gradingform_rubric_ranges_h';
 

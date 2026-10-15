@@ -941,8 +941,10 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                     'id' => '{NAME}-criteria-{CRITERION-id}-weight',
                     'class' => 'custom-select weightselect',
                 ]);
-                $html = html_writer::label(get_string('weight', 'gradingform_rubric_ranges'),
-                    '{NAME}-criteria-{CRITERION-id}-weight');
+                $html = html_writer::label(
+                    get_string('weight', 'gradingform_rubric_ranges'),
+                    '{NAME}-criteria-{CRITERION-id}-weight'
+                );
                 $html .= $select;
                 $html .= html_writer::span($percent === '' ? '' :
                     get_string('weightpercent', 'gradingform_rubric_ranges', $percent), 'weightpercent');
@@ -1024,8 +1026,11 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                 if ($grade === '') {
                     return '';
                 }
-                return html_writer::div($grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'), 'inline',
-                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']);
+                return html_writer::div(
+                    $grade . ' ' . get_string('pts', 'gradingform_rubric_ranges'),
+                    'inline',
+                    ['id' => '{NAME}-criteria-{CRITERION-id}-grade']
+                );
 
             default:
                 return '';
@@ -1041,8 +1046,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
      * @return string
      */
     protected function numeric_remarks_warning($mode, $options) {
-        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL
-                || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
+        $editing = $mode == gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL;
+        if (!$editing || !features::numericgrading_enabled() || !empty($options['enableremarks'])) {
             return '';
         }
         return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
@@ -1066,9 +1071,13 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
         switch ($state) {
             case validation_manager::STATE_VALIDATED:
-                return $this->validation_badge($history) .
-                    $this->display_rubric($criteria, $options, $review, $elementname . '-review',
-                        $this->add_validation_values($values, $criteria, $history));
+                return $this->validation_badge($history) . $this->display_rubric(
+                    $criteria,
+                    $options,
+                    $review,
+                    $elementname . '-review',
+                    $this->add_validation_values($values, $criteria, $history)
+                );
 
             case validation_manager::STATE_NOT_GRADED:
                 return $this->output->notification(get_string('validationnotgraded', 'gradingform_rubric_ranges'), 'info') .
@@ -1078,7 +1087,9 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                 $html = $this->output->notification(get_string('validationpending', 'gradingform_rubric_ranges'), 'info');
                 $html .= html_writer::div(
                     $this->display_rubric($criteria, $options, $review, $elementname . '-review', $values),
-                    '', ['id' => $elementname . '-validation-review']);
+                    '',
+                    ['id' => $elementname . '-validation-review']
+                );
                 $html .= html_writer::tag('button', get_string('validate', 'gradingform_rubric_ranges'), [
                     'type' => 'button',
                     'id' => $elementname . '-validate-button',
@@ -1091,8 +1102,13 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
                     'id' => $elementname . '-validate',
                     'value' => 0,
                 ]);
-                $editable .= $this->display_rubric($criteria, $options, gradingform_rubric_ranges_controller::DISPLAY_EVAL,
-                    $elementname, $values);
+                $editable .= $this->display_rubric(
+                    $criteria,
+                    $options,
+                    gradingform_rubric_ranges_controller::DISPLAY_EVAL,
+                    $elementname,
+                    $values
+                );
                 $html .= html_writer::div($editable, '', ['id' => $elementname . '-validation-editable', 'hidden' => 'hidden']);
                 return $html;
 
@@ -1113,7 +1129,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         }
         $record = reset($history);
         $a = (object) [
-            'validator' => $this->user_fullname($record->get('validatorid')),
+            'validator' => s($this->user_fullname($record->get('validatorid'))),
             'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
         ];
         return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
@@ -1156,8 +1172,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
      * @return string
      */
     protected function validation_template($mode, $value) {
-        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_REVIEW || !is_array($value)
-                || empty($value['validation'])) {
+        $review = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
+        if (!$review || !is_array($value) || empty($value['validation'])) {
             return '';
         }
         $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
@@ -1166,8 +1182,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             'teacher' => s($value['validation']['teacher']),
         ]), 'validationoriginal');
         if ($value['validation']['remark'] !== '') {
-            $html .= html_writer::div(get_string('validationoriginalremark', 'gradingform_rubric_ranges',
-                s($value['validation']['remark'])), 'validationoriginalremark');
+            $remark = get_string('validationoriginalremark', 'gradingform_rubric_ranges', s($value['validation']['remark']));
+            $html .= html_writer::div($remark, 'validationoriginalremark');
         }
         return html_writer::div($html, 'validation');
     }

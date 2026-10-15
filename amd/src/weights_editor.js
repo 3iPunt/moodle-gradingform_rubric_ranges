@@ -92,20 +92,24 @@ const copyDuplicatedWeight = (root, button) => {
  *
  * @param {String} name the rubric editor element name
  */
-export const init = async(name) => {
+export const init = (name) => {
     const root = document.getElementById(`rubric-${name}`);
     if (!root) {
         return;
     }
 
-    try {
-        [percentTemplate, decimalSeparator] = await getStrings([
-            {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},
-            {key: 'decsep', component: 'langconfig'},
-        ]);
-    } catch (e) {
+    // Listeners are attached at once; the localised strings arrive later and trigger a new calculation.
+    getStrings([
+        {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},
+        {key: 'decsep', component: 'langconfig'},
+    ]).then(([template, separator]) => {
+        percentTemplate = template;
+        decimalSeparator = separator;
+        recalculate(root);
+        return null;
+    }).catch(() => {
         // Keep the defaults.
-    }
+    });
 
     root.addEventListener('change', (e) => {
         if (e.target.matches(SELECTORS.WEIGHT)) {
@@ -113,22 +117,26 @@ export const init = async(name) => {
         }
     });
 
+    // The YUI handlers are attached to the buttons themselves, so the DOM is already updated here.
     root.addEventListener('click', (e) => {
         if (e.target.matches('input[type=submit][id$="-duplicate"]')) {
             copyDuplicatedWeight(root, e.target);
             recalculate(root);
+        } else if (e.target.matches('input[type=submit][id$="-addcriterion"]')) {
+            recalculate(root);
         }
     });
 
-    // Criteria added or deleted by the YUI editor (deletion happens after a confirmation dialog).
+    // Any other change of the criteria (e.g. deletion, which happens after a confirmation dialog).
+    // A timeout is used instead of requestAnimationFrame, which does not run in pages that are not painted.
     let scheduled = false;
     const observer = new MutationObserver(() => {
         if (!scheduled) {
             scheduled = true;
-            window.requestAnimationFrame(() => {
+            setTimeout(() => {
                 scheduled = false;
                 recalculate(root);
-            });
+            }, 0);
         }
     });
     observer.observe(root, {childList: true, subtree: true});

@@ -30,7 +30,6 @@ namespace gradingform_rubric_ranges\local;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 final class range_resolver {
-
     /**
      * Returns the range of every level of a criterion.
      *
@@ -123,8 +122,10 @@ final class range_resolver {
             return null;
         }
         $grade = $filling['grade'] ?? null;
-        if ($grade !== null && $grade !== '' && is_numeric($grade)
-                && self::level_for_grade($criterion, (int) $grade) === (int) $levelid) {
+        if (
+            $grade !== null && $grade !== '' && is_numeric($grade)
+                && self::level_for_grade($criterion, (int) $grade) === (int) $levelid
+        ) {
             return (float) $grade;
         }
         return (float) $criterion['levels'][$levelid]['score'];

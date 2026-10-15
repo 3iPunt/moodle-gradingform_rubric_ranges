@@ -48,13 +48,22 @@ final class renderer_test extends \advanced_testcase {
      * @param array $options option overrides
      * @return string
      */
-    private function render(\gradingform_rubric_ranges_controller $controller, int $mode, ?array $values = null,
-            array $options = []): string {
+    private function render(
+        \gradingform_rubric_ranges_controller $controller,
+        int $mode,
+        ?array $values = null,
+        array $options = []
+    ): string {
         global $PAGE;
         $PAGE->set_url('/');
         $definition = $controller->get_definition(true);
-        return $controller->get_renderer($PAGE)->display_rubric($definition->rubric_criteria,
-            array_merge($controller->get_options(), $options), $mode, 'rr', $values);
+        return $controller->get_renderer($PAGE)->display_rubric(
+            $definition->rubric_criteria,
+            array_merge($controller->get_options(), $options),
+            $mode,
+            'rr',
+            $values
+        );
     }
 
     /**
@@ -65,12 +74,16 @@ final class renderer_test extends \advanced_testcase {
         $this->set_flags(true, false, false);
         [, , , $controller] = $this->create_assign_with_rubric(null, ['C1' => 3]);
         $ids = $this->criterion_ids($controller);
-        $this->assertStringContainsString('name="rr[criteria][' . $ids['C1'] . '][weight]"',
-            $this->render($controller, controller::DISPLAY_EDIT_FULL));
+        $this->assertStringContainsString(
+            'name="rr[criteria][' . $ids['C1'] . '][weight]"',
+            $this->render($controller, controller::DISPLAY_EDIT_FULL)
+        );
         $this->assertStringContainsString('Weight 3 · 75 %', $this->render($controller, controller::DISPLAY_REVIEW));
         $this->assertStringNotContainsString('class="weight"', $this->render($controller, controller::DISPLAY_VIEW));
-        $this->assertMatchesRegularExpression('/type="hidden" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[weight\]" value="3"/',
-            $this->render($controller, controller::DISPLAY_EDIT_FROZEN));
+        $this->assertMatchesRegularExpression(
+            '/type="hidden" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[weight\]" value="3"/',
+            $this->render($controller, controller::DISPLAY_EDIT_FROZEN)
+        );
         $this->set_flags(false, false, false);
         $this->assertStringNotContainsString('weightselect', $this->render($controller, controller::DISPLAY_EDIT_FULL));
     }
@@ -89,14 +102,18 @@ final class renderer_test extends \advanced_testcase {
 
         $eval = $this->render($controller, controller::DISPLAY_EVAL, $values);
         $this->assertMatchesRegularExpression(
-            '/<input type="number" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[grade\]"[^>]*max="100"[^>]*value="65"/', $eval);
+            '/<input type="number" name="rr\[criteria\]\[' . $ids['C1'] . '\]\[grade\]"[^>]*max="100"[^>]*value="65"/',
+            $eval
+        );
         $this->assertStringNotContainsString('<select', $eval);
         $this->assertStringContainsString('data-rangemin="61" data-rangemax="70" data-definition="Buen dominio conceptual"', $eval);
         $this->assertStringContainsString('0 to 5', $eval);
         $review = $this->render($controller, controller::DISPLAY_REVIEW, $values);
         $this->assertStringContainsString('65 pts', $review);
-        $this->assertStringContainsString('feedback of the level will not be applied',
-            $this->render($controller, controller::DISPLAY_EDIT_FULL, null, ['enableremarks' => 0]));
+        $this->assertStringContainsString(
+            'feedback of the level will not be applied',
+            $this->render($controller, controller::DISPLAY_EDIT_FULL, null, ['enableremarks' => 0])
+        );
         // No PHP notice for the upstream $currentgrade when remarks are disabled.
         $this->render($controller, controller::DISPLAY_EVAL_FROZEN, $values, ['enableremarks' => 0]);
     }
@@ -110,10 +127,15 @@ final class renderer_test extends \advanced_testcase {
         $this->set_flags(false, true, true);
         [$course, , $context, $controller] = $this->create_assign_with_rubric();
         $ids = $this->criterion_ids($controller);
-        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher', ['firstname' => 'Tea', 'lastname' => 'Cher']);
+        $teacher = $this->getDataGenerator()->create_and_enrol(
+            $course,
+            'editingteacher',
+            ['firstname' => 'Tea', 'lastname' => 'Cher']
+        );
         $validator = $this->create_validator($course);
         $DB->set_field('user', 'firstname', 'Vali', ['id' => $validator->id]);
-        $DB->set_field('user', 'lastname', 'Dator', ['id' => $validator->id]);
+        // Markup in the name must be escaped in the validation badge.
+        $DB->set_field('user', 'lastname', 'Dator <i>x</i>', ['id' => $validator->id]);
         foreach ([900, 903] as $itemid) {
             $this->grade_as($teacher, $controller, $itemid, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T1'));
         }
@@ -121,7 +143,7 @@ final class renderer_test extends \advanced_testcase {
 
         $PAGE->set_context($context);
         $PAGE->set_url('/');
-        $render = function(int $itemid) use ($controller, $validator) {
+        $render = function (int $itemid) use ($controller, $validator) {
             global $PAGE;
             $instance = $controller->get_or_create_instance(0, $validator->id, $itemid);
             $element = new \MoodleQuickForm_grading('advancedgrading', 'Grade', ['gradinginstance' => $instance]);
@@ -135,7 +157,8 @@ final class renderer_test extends \advanced_testcase {
         $this->assertStringContainsString('name="advancedgrading[validate]" id="advancedgrading-validate" value="0"', $pending);
 
         $validated = $render(900);
-        $this->assertStringContainsString('Grade validated by Vali Dator', $validated);
+        $this->assertStringContainsString('Grade validated by Vali Dator &lt;i&gt;x&lt;/i&gt;', $validated);
+        $this->assertStringNotContainsString('<i>x</i>', $validated);
         $this->assertStringContainsString('Original grade: 65 · Buen dominio conceptual · Tea Cher', $validated);
         $this->assertStringContainsString('Original feedback: T1', $validated);
         $this->assertStringNotContainsString('type="number"', $validated);

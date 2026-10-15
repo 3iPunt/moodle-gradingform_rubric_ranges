@@ -55,8 +55,11 @@ final class validation_manager_test extends \advanced_testcase {
         $this->set_flags(false, true, true);
         [$this->course, , , $this->controller] = $this->create_assign_with_rubric();
         $this->ids = $this->criterion_ids($this->controller);
-        $this->teacher = $this->getDataGenerator()->create_and_enrol($this->course, 'editingteacher',
-            ['firstname' => 'Tea', 'lastname' => 'Cher']);
+        $this->teacher = $this->getDataGenerator()->create_and_enrol(
+            $this->course,
+            'editingteacher',
+            ['firstname' => 'Tea', 'lastname' => 'Cher']
+        );
         $this->validator = $this->create_validator($this->course);
     }
 
@@ -109,8 +112,10 @@ final class validation_manager_test extends \advanced_testcase {
         $this->assertEqualsWithDelta($grade, $result, 0.001);
         $this->assertFalse(validation_manager::is_validated(900));
         $this->assertFalse($DB->record_exists('grading_instances', ['id' => $copy->get_id()]));
-        $this->assertEquals($this->teacher->id,
-            $DB->get_field_select('grading_instances', 'raterid', 'itemid = 900 AND status = 1'));
+        $this->assertEquals(
+            $this->teacher->id,
+            $DB->get_field_select('grading_instances', 'raterid', 'itemid = 900 AND status = 1')
+        );
         $this->assertEquals(65, $this->current_filling(900)[$this->ids['C1']]['grade']);
     }
 
@@ -121,8 +126,12 @@ final class validation_manager_test extends \advanced_testcase {
         $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T1'));
         $this->setUser($this->validator);
         $sink = $this->redirectEvents();
-        $grade = $this->grade_as($this->validator, $this->controller, 900,
-            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V1', true));
+        $grade = $this->grade_as(
+            $this->validator,
+            $this->controller,
+            900,
+            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V1', true)
+        );
         $events = array_filter($sink->get_events(), fn($e) => $e instanceof \gradingform_rubric_ranges\event\grade_validated);
         $sink->close();
         $this->assertEqualsWithDelta(8700 / 110, $grade, 0.001);
@@ -146,8 +155,10 @@ final class validation_manager_test extends \advanced_testcase {
         $filling = $this->current_filling(900);
         $this->assertEquals(80, $filling[$this->ids['C1']]['grade']);
         $this->assertSame('V1', $filling[$this->ids['C1']]['remark']);
-        $this->assertSame(validation_manager::STATE_VALIDATED,
-            validation_manager::get_state($this->instance_for($this->teacher, 900), (int) $this->teacher->id));
+        $this->assertSame(
+            validation_manager::STATE_VALIDATED,
+            validation_manager::get_state($this->instance_for($this->teacher, 900), (int) $this->teacher->id)
+        );
     }
 
     /**
@@ -155,13 +166,22 @@ final class validation_manager_test extends \advanced_testcase {
      */
     public function test_validated_is_locked(): void {
         $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 65, 'C2' => 2], 'T'));
-        $validated = $this->grade_as($this->validator, $this->controller, 900,
-            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true));
-        $again = $this->grade_as($this->validator, $this->controller, 900,
-            $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z', true));
+        $validated = $this->grade_as(
+            $this->validator,
+            $this->controller,
+            900,
+            $this->filling($this->ids, ['C1' => 80, 'C2' => 7], 'V', true)
+        );
+        $again = $this->grade_as(
+            $this->validator,
+            $this->controller,
+            900,
+            $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z', true)
+        );
         $this->assertEqualsWithDelta($validated, $again, 0.001);
         $this->assertCount(2, validation_manager::get_history(900));
-        $teacher = $this->grade_as($this->teacher, $this->controller, 900, $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z'));
+        $regrade = $this->filling($this->ids, ['C1' => 10, 'C2' => 1], 'Z');
+        $teacher = $this->grade_as($this->teacher, $this->controller, 900, $regrade);
         $this->assertEqualsWithDelta($validated, $teacher, 0.001);
         $empty = $this->grade_as($this->teacher, $this->controller, 900, ['criteria' => []]);
         $this->assertEqualsWithDelta($validated, $empty, 0.001);
@@ -174,8 +194,10 @@ final class validation_manager_test extends \advanced_testcase {
     public function test_not_graded(): void {
         global $DB;
         $instance = $this->instance_for($this->validator, 901);
-        $this->assertSame(validation_manager::STATE_NOT_GRADED,
-            validation_manager::get_state($instance, (int) $this->validator->id));
+        $this->assertSame(
+            validation_manager::STATE_NOT_GRADED,
+            validation_manager::get_state($instance, (int) $this->validator->id)
+        );
         $this->assertEquals(-1, $instance->submit_and_get_grade($this->filling($this->ids, ['C1' => 50, 'C2' => 5]), 901));
         $this->assertFalse($DB->record_exists_select('grading_instances', 'itemid = 901 AND status = 1'));
     }

@@ -30,7 +30,6 @@ use gradingform_rubric_ranges\persistent\criterion_weight;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 final class weights {
-
     /** @var int Minimum weight. */
     const MIN = 1;
 

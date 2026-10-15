@@ -84,8 +84,11 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
             null, null, new pix_icon('icon', '', 'gradingform_rubric_ranges'));
         // IED extension: site settings page (core does not load settings.php for gradingform plugins).
         if (has_capability('moodle/site:config', context_system::instance())) {
-            $node->add(get_string('settingspage', 'gradingform_rubric_ranges'),
-                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'), settings_navigation::TYPE_CUSTOM);
+            $node->add(
+                get_string('settingspage', 'gradingform_rubric_ranges'),
+                new moodle_url('/grade/grading/form/rubric_ranges/settings_page.php'),
+                settings_navigation::TYPE_CUSTOM
+            );
         }
     }
 
@@ -226,8 +229,9 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
                     $haschanges[1] = true;
                 }
                 // IED extension: a weight change affects the grade, students require re-grading.
-                if (array_key_exists('weight', $criterion)
-                        && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight']) {
+                $weightchanged = array_key_exists('weight', $criterion)
+                    && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight'];
+                if ($weightchanged) {
                     if ($doupdate) {
                         weights::save($id, $criterion['weight']);
                     }
@@ -964,8 +968,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
                 return false;
             }
             // IED extension: a numeric grade is data too.
-            if (features::numericgrading_enabled()
-                    && trim((string) ($elementvalue['criteria'][$id]['grade'] ?? '')) !== '') {
+            $grade = trim((string) ($elementvalue['criteria'][$id]['grade'] ?? ''));
+            if (features::numericgrading_enabled() && $grade !== '') {
                 return false;
             }
         }
@@ -1095,8 +1099,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
         global $DB, $USER;
 
         $state = validation_manager::get_state($this, (int) $USER->id);
-        if (validation_manager::is_locked($state, $elementvalue) ||
-                ($state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue))) {
+        $emptyvalidation = $state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue);
+        if (validation_manager::is_locked($state, $elementvalue) || $emptyvalidation) {
             return validation_manager::keep_current_grade($this);
         }
         if ($state !== validation_manager::STATE_PENDING) {
@@ -1125,10 +1129,15 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
             if (!$controller->is_form_available()) {
                 return -1;
             }
-            return grade_calculator::calculate($controller->get_definition()->rubric_criteria, $grade,
-                $controller->get_options(), array_keys($controller->get_grade_range()),
-                (bool) $controller->get_allow_grade_decimals(), features::weighting_enabled(),
-                features::numericgrading_enabled());
+            return grade_calculator::calculate(
+                $controller->get_definition()->rubric_criteria,
+                $grade,
+                $controller->get_options(),
+                array_keys($controller->get_grade_range()),
+                (bool) $controller->get_allow_grade_decimals(),
+                features::weighting_enabled(),
+                features::numericgrading_enabled()
+            );
         }
 
         if (!($scores = $this->get_controller()->get_min_max_score()) || $scores['maxscore'] <= $scores['minscore']) {
@@ -1196,8 +1205,11 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
             );
             // IED extension: numeric grade, automatic level and feedback.
             if (features::numericgrading_enabled()) {
-                $page->requires->js_call_amd('gradingform_rubric_ranges/numeric_grading', 'init',
-                    [$gradingformelement->getName()]);
+                $page->requires->js_call_amd(
+                    'gradingform_rubric_ranges/numeric_grading',
+                    'init',
+                    [$gradingformelement->getName()]
+                );
             }
             $mode = gradingform_rubric_ranges_controller::DISPLAY_EVAL;
         } else {
@@ -1255,7 +1267,13 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
             }
             $history = validation_manager::get_history((int) $this->get_data('itemid'));
             return $html . $this->get_controller()->get_renderer($page)->display_validation_element(
-                $state, $criteria, $options, $gradingformelement->getName(), $value, $history);
+                $state,
+                $criteria,
+                $options,
+                $gradingformelement->getName(),
+                $value,
+                $history
+            );
         }
         $html .= $this->get_controller()->get_renderer($page)->display_rubric(
             $criteria, $options, $mode, $gradingformelement->getName(), $value

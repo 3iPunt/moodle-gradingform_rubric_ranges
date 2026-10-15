@@ -28,7 +28,6 @@ use core\persistent;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class criterion_weight extends persistent {
-
     /** @var string Table name. */
     const TABLE = 'gradingform_rubric_ranges_w';
 

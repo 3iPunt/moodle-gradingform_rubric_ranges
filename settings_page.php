@@ -60,8 +60,12 @@ if ($data = $form->get_data()) {
             set_config($name, $new, features::COMPONENT);
         }
     }
-    redirect($url, get_string('settingssaved', 'gradingform_rubric_ranges'), null,
-        \core\output\notification::NOTIFY_SUCCESS);
+    redirect(
+        $url,
+        get_string('settingssaved', 'gradingform_rubric_ranges'),
+        null,
+        \core\output\notification::NOTIFY_SUCCESS
+    );
 }
 
 echo $OUTPUT->header();

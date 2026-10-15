@@ -26,7 +26,6 @@ namespace gradingform_rubric_ranges\local;
  * @covers     \gradingform_rubric_ranges\local\range_resolver
  */
 final class range_resolver_test extends \basic_testcase {
-
     /** @var array Criterion with levels 50, 60, 70 and 100 (ids 11 to 14). */
     private const CRITERION = ['levels' => [
         11 => ['score' => 50, 'definition' => 'Insuf'],
@@ -41,8 +40,10 @@ final class range_resolver_test extends \basic_testcase {
     public function test_ranges_for_criterion(): void {
         $ranges = range_resolver::ranges_for_criterion(self::CRITERION);
         $this->assertSame([11, 12, 13, 14], array_keys($ranges));
-        $this->assertSame(['0-50', '51-60', '61-70', '71-100'],
-            array_map(fn($r) => $r['min'] . '-' . $r['max'], array_values($ranges)));
+        $this->assertSame(
+            ['0-50', '51-60', '61-70', '71-100'],
+            array_map(fn($r) => $r['min'] . '-' . $r['max'], array_values($ranges))
+        );
     }
 
     /**
@@ -51,8 +52,10 @@ final class range_resolver_test extends \basic_testcase {
     public function test_ranges_descending_order(): void {
         $criterion = self::CRITERION;
         $criterion['levels'] = array_reverse($criterion['levels'], true);
-        $this->assertEquals(range_resolver::ranges_for_criterion(self::CRITERION),
-            range_resolver::ranges_for_criterion($criterion));
+        $this->assertEquals(
+            range_resolver::ranges_for_criterion(self::CRITERION),
+            range_resolver::ranges_for_criterion($criterion)
+        );
     }
 
     /**
@@ -139,9 +142,10 @@ final class range_resolver_test extends \basic_testcase {
     public function test_validate_filling(): void {
         $other = ['levels' => [21 => ['score' => 5], 22 => ['score' => 10]]];
         $criteria = [1 => self::CRITERION, 2 => $other];
-        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['grade' => '2']]]));
-        $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '101'], 2 => ['grade' => '2']]]));
-        $this->assertTrue(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => ['levelid' => 22]]]));
+        $valid = fn(array $c1, array $c2) => range_resolver::validate_filling($criteria, ['criteria' => [1 => $c1, 2 => $c2]]);
+        $this->assertTrue($valid(['grade' => '65'], ['grade' => '2']));
+        $this->assertFalse($valid(['grade' => '101'], ['grade' => '2']));
+        $this->assertTrue($valid(['grade' => '65'], ['levelid' => 22]));
         $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65'], 2 => []]]));
         $this->assertFalse(range_resolver::validate_filling($criteria, ['criteria' => [1 => ['grade' => '65']]]));
     }

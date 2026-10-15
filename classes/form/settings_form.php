@@ -30,7 +30,6 @@ use gradingform_rubric_ranges\local\features;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class settings_form extends \moodleform {
-
     /**
      * Form definition.
      */

@@ -55,6 +55,7 @@ final class grade_validated_test extends \advanced_testcase {
         $this->assertEquals($context->id, $event->contextid);
         $this->assertEquals('gradingform_rubric_ranges_h', $event->objecttable);
         $this->assertSame(900, $event->other['itemid']);
+        $this->assertIsInt($event->other['instanceid']);
         $this->assertSame(2, $event->other['criteria']);
         $this->assertEquals($teacher->id, $event->other['teacherid']);
         $this->assertStringContainsString("validated the grade of the grading item with id '900'", $event->get_description());

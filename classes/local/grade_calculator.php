@@ -31,7 +31,6 @@ namespace gradingform_rubric_ranges\local;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 final class grade_calculator {
-
     /**
      * Calculates the grade of a filled rubric.
      *
@@ -44,8 +43,15 @@ final class grade_calculator {
      * @param bool $numeric whether numeric grading is enabled
      * @return float|int the grade, -1 when it cannot be calculated
      */
-    public static function calculate(array $criteria, array $filling, array $options, array $graderange,
-            bool $allowdecimals, bool $weighting, bool $numeric) {
+    public static function calculate(
+        array $criteria,
+        array $filling,
+        array $options,
+        array $graderange,
+        bool $allowdecimals,
+        bool $weighting,
+        bool $numeric
+    ) {
         if (empty($graderange) || empty($criteria)) {
             return -1;
         }

@@ -139,7 +139,8 @@ class provider implements
         }
         writer::with_context($context)->export_data(
             array_merge($subcontext, [get_string('privacy:validation', 'gradingform_rubric_ranges')]),
-            (object) ['validation' => $data]);
+            (object) ['validation' => $data]
+        );
     }
 
     /**
@@ -164,13 +165,13 @@ class provider implements
      */
     public static function get_contexts_for_userid(int $userid): contextlist {
         $contextlist = new contextlist();
-        $contextlist->add_from_sql("SELECT a.contextid
-                                      FROM {gradingform_rubric_ranges_h} h
-                                      JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
-                                      JOIN {grading_definitions} d ON d.id = c.definitionid
-                                      JOIN {grading_areas} a ON a.id = d.areaid
-                                     WHERE h.teacherid = :teacherid OR h.validatorid = :validatorid",
-            ['teacherid' => $userid, 'validatorid' => $userid]);
+        $sql = "SELECT a.contextid
+                  FROM {gradingform_rubric_ranges_h} h
+                  JOIN {gradingform_rubric_ranges_c} c ON c.id = h.criterionid
+                  JOIN {grading_definitions} d ON d.id = c.definitionid
+                  JOIN {grading_areas} a ON a.id = d.areaid
+                 WHERE h.teacherid = :teacherid OR h.validatorid = :validatorid";
+        $contextlist->add_from_sql($sql, ['teacherid' => $userid, 'validatorid' => $userid]);
         return $contextlist;
     }
 

@@ -34,7 +34,6 @@ namespace gradingform_rubric_ranges\event;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class grade_validated extends \core\event\base {
-
     /**
      * Init method.
      */

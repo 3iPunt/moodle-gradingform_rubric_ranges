@@ -26,7 +26,6 @@ namespace gradingform_rubric_ranges\local;
  * @covers     \gradingform_rubric_ranges\local\grade_calculator
  */
 final class grade_calculator_test extends \basic_testcase {
-
     /**
      * C1: ranged, max 100, weight 3. C2: not ranged, max 10, weight 1.
      *
@@ -103,8 +102,15 @@ final class grade_calculator_test extends \basic_testcase {
      * @param float $expected
      */
     public function test_calculate(bool $weighting, bool $numeric, int $lock, float $expected): void {
-        $grade = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
-            true, $weighting, $numeric);
+        $grade = grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => $lock],
+            range(0, 100),
+            true,
+            $weighting,
+            $numeric
+        );
         $this->assertEqualsWithDelta($expected, $grade, 0.001);
     }
 
@@ -113,9 +119,19 @@ final class grade_calculator_test extends \basic_testcase {
      */
     public function test_all_off_is_upstream(): void {
         foreach ([1, 0] as $lock) {
-            $this->assertEqualsWithDelta(self::upstream(self::criteria(), self::filling(), (bool) $lock, range(0, 100)),
-                grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => $lock], range(0, 100),
-                    true, false, false), 0.001);
+            $this->assertEqualsWithDelta(
+                self::upstream(self::criteria(), self::filling(), (bool) $lock, range(0, 100)),
+                grade_calculator::calculate(
+                    self::criteria(),
+                    self::filling(),
+                    ['lockzeropoints' => $lock],
+                    range(0, 100),
+                    true,
+                    false,
+                    false
+                ),
+                0.001
+            );
         }
     }
 
@@ -130,48 +146,110 @@ final class grade_calculator_test extends \basic_testcase {
         ];
         $filling = ['criteria' => [1 => ['levelid' => 12, 'grade' => null], 2 => ['levelid' => 22, 'grade' => null]]];
         foreach ([1, 0] as $lock) {
-            $this->assertEqualsWithDelta(self::upstream($same, $filling, (bool) $lock, range(0, 100)),
-                grade_calculator::calculate($same, $filling, ['lockzeropoints' => $lock], range(0, 100), true, true, false), 0.001);
+            $this->assertEqualsWithDelta(
+                self::upstream($same, $filling, (bool) $lock, range(0, 100)),
+                grade_calculator::calculate($same, $filling, ['lockzeropoints' => $lock], range(0, 100), true, true, false),
+                0.001
+            );
         }
         $diffmin = $same;
         $diffmin[2]['levels'] = [21 => $level(21, 20), 22 => $level(22, 100)];
-        $this->assertNotEqualsWithDelta(self::upstream($diffmin, $filling, false, range(0, 100)),
-            grade_calculator::calculate($diffmin, $filling, ['lockzeropoints' => 0], range(0, 100), true, true, false), 0.001);
+        $this->assertNotEqualsWithDelta(
+            self::upstream($diffmin, $filling, false, range(0, 100)),
+            grade_calculator::calculate($diffmin, $filling, ['lockzeropoints' => 0], range(0, 100), true, true, false),
+            0.001
+        );
     }
 
     /**
      * Rounding and scales work as upstream.
      */
     public function test_rounding_and_scales(): void {
-        $this->assertEquals(54, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
-            range(0, 100), false, true, true));
-        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
-            range(1, 5), false, true, true));
-        $this->assertEquals(3, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0],
-            range(1, 5), false, true, true));
+        $this->assertEquals(54, grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => 1],
+            range(0, 100),
+            false,
+            true,
+            true
+        ));
+        $this->assertEquals(3, grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => 1],
+            range(1, 5),
+            false,
+            true,
+            true
+        ));
+        $this->assertEquals(3, grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => 0],
+            range(1, 5),
+            false,
+            true,
+            true
+        ));
     }
 
     /**
      * Criteria that cannot be normalised are left out; criteria without filling count 0.
      */
     public function test_excluded_and_missing_criteria(): void {
-        $base = grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 0], range(0, 100),
-            true, true, false);
+        $base = grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => 0],
+            range(0, 100),
+            true,
+            true,
+            false
+        );
         $flat = self::criteria();
         $flat[3] = ['isranged' => 0, 'weight' => 10, 'levels' => [31 => ['score' => 7], 32 => ['score' => 7]]];
         $filling = self::filling();
         $filling['criteria'][3] = ['levelid' => 31, 'grade' => null];
-        $this->assertEqualsWithDelta($base, grade_calculator::calculate($flat, $filling, ['lockzeropoints' => 0],
-            range(0, 100), true, true, false), 0.001);
+        $this->assertEqualsWithDelta($base, grade_calculator::calculate(
+            $flat,
+            $filling,
+            ['lockzeropoints' => 0],
+            range(0, 100),
+            true,
+            true,
+            false
+        ), 0.001);
 
         $missing = ['criteria' => [1 => self::filling()['criteria'][1]]];
-        $this->assertEqualsWithDelta(48.75, grade_calculator::calculate(self::criteria(), $missing, ['lockzeropoints' => 1],
-            range(0, 100), true, true, true), 0.001);
+        $this->assertEqualsWithDelta(48.75, grade_calculator::calculate(
+            self::criteria(),
+            $missing,
+            ['lockzeropoints' => 1],
+            range(0, 100),
+            true,
+            true,
+            true
+        ), 0.001);
 
-        $this->assertEquals(-1, grade_calculator::calculate([3 => ['isranged' => 0, 'weight' => 1,
-            'levels' => [31 => ['score' => 0], 32 => ['score' => 0]]]], $filling, ['lockzeropoints' => 1],
-            range(0, 100), true, true, false));
-        $this->assertEquals(-1, grade_calculator::calculate(self::criteria(), self::filling(), ['lockzeropoints' => 1],
-            [], true, true, true));
+        $this->assertEquals(-1, grade_calculator::calculate(
+            [3 => ['isranged' => 0, 'weight' => 1,
+            'levels' => [31 => ['score' => 0], 32 => ['score' => 0]]]],
+            $filling,
+            ['lockzeropoints' => 1],
+            range(0, 100),
+            true,
+            true,
+            false
+        ));
+        $this->assertEquals(-1, grade_calculator::calculate(
+            self::criteria(),
+            self::filling(),
+            ['lockzeropoints' => 1],
+            [],
+            true,
+            true,
+            true
+        ));
     }
 }

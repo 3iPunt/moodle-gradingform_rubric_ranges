@@ -17,7 +17,7 @@ Every feature is **disabled by default**. With all of them disabled the plugin b
 | Upstream branch | `MOODLE_402_STABLE` |
 | Upstream commit | `2aece39` (release `2024112200`) |
 | Fork version | `2024112201` / `2024112200-ied1` |
-| Moodle | 4.5 LTS |
+| Moodle | 4.5 LTS only (`requires = 2024100700`, `supported = [405, 405]`): the fork is only tested on 4.5 |
 
 ## Patch series
 
@@ -33,8 +33,37 @@ One commit per task, applied in order:
 | `0006-T5-…` | Backup and restore of weights and validation history |
 | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
 | `0008-T7-…` | PHPUnit tests of the IED extension |
+| `0009-T8-…` | QA hardening: Moodle 4.5 only, escaping, end to end gradebook test, coding style of the fork lines, setup guide |
 
-Further patches are added as each task is delivered.
+## Setting up the extension (site administrator)
+
+1. Apply the patches and run `php admin/cli/upgrade.php` (or visit *Site administration > Notifications*).
+2. Open `/grade/grading/form/rubric_ranges/settings_page.php` (also linked as "Ranged rubric settings" in the
+   activity navigation of a ranged rubric) and enable the features needed: weighting, numeric grading, validation.
+3. For validation, create a validator role:
+   - *Site administration > Users > Permissions > Define roles > Add a new role*, based on the **Teacher** (or
+     Manager) archetype so it can grade the activity;
+   - allow `gradingform/rubric_ranges:validate`;
+   - assign it in the course (or category) to the validators. The validator must not be the teacher who grades:
+     a user cannot validate their own grade, and a validator cannot give the first grade.
+   - Site administrators are **not** validators unless they get this role.
+4. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
+   automatically (the rubric editor warns otherwise).
+5. Quick check: grade a student with the rubric, validate the grade with the validator, and check the gradebook and
+   the log (*Ranged rubric grade validated*).
+
+## Accepted limitations
+
+| Limitation | Reason |
+|---|---|
+| The grader side panel (forum) does not show the weights, the numeric grade or the validation | Out of scope; the lock of validated grades also applies there |
+| Validating needs JavaScript | The "Validate" button swaps the read only rubric for the editable one |
+| The `grade_validated` event has no `relateduserid` | There is no generic API to get the graded user from a grading item |
+| `DISPLAY_EVAL_FROZEN` does not render the points cell | Upstream behaviour; the stored grade is kept |
+| The privacy export of the grading is keyed by criterion description | Upstream export contract |
+| Enabling or disabling weighting does not recalculate grades already in the gradebook | Only grades saved afterwards use the new setting |
+| The grader side panel PHPUnit tests error on Moodle 4.5 | Upstream issue (MDL-76583), see Tests |
+| `moodle-cs` reports errors in upstream code | Upstream predates the current standard; only the lines added by the fork are kept clean (except a few lines inside upstream constructs and the language strings kept as a block at the end of the file to reduce patch conflicts) |
 
 ## Generating the patches
 

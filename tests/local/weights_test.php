@@ -83,7 +83,7 @@ final class weights_test extends \advanced_testcase {
     public function test_editor_prepare_data(): void {
         $this->resetAfterTest();
         $element = new \MoodleQuickForm_rubricrangeseditor('rubricranges');
-        $prepare = fn($value) => (function($v) {
+        $prepare = fn($value) => (function ($v) {
             return $this->prepare_data($v);
         })->call($element, $value);
         $data = $prepare(['criteria' => [5 => ['description' => 'x', 'weight' => 99, 'levels' => []]]]);
@@ -134,8 +134,10 @@ final class weights_test extends \advanced_testcase {
         $data->rubricranges['criteria'][$ids['C2']]['weight'] = 5;
         $data->rubricranges['regrade'] = 1;
         $controller->update_definition($data);
-        $this->assertEquals(\gradingform_instance::INSTANCE_STATUS_NEEDUPDATE,
-            $DB->get_field('grading_instances', 'status', ['id' => $instance->get_id()]));
+        $this->assertEquals(
+            \gradingform_instance::INSTANCE_STATUS_NEEDUPDATE,
+            $DB->get_field('grading_instances', 'status', ['id' => $instance->get_id()])
+        );
     }
 
     /**

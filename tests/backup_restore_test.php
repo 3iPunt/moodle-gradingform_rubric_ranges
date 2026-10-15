@@ -48,8 +48,14 @@ final class backup_restore_test extends \advanced_testcase {
      */
     private function backup_restore(int $courseid, bool $users): int {
         global $CFG, $USER;
-        $bc = new \backup_controller(\backup::TYPE_1COURSE, $courseid, \backup::FORMAT_MOODLE, \backup::INTERACTIVE_NO,
-            \backup::MODE_GENERAL, $USER->id);
+        $bc = new \backup_controller(
+            \backup::TYPE_1COURSE,
+            $courseid,
+            \backup::FORMAT_MOODLE,
+            \backup::INTERACTIVE_NO,
+            \backup::MODE_GENERAL,
+            $USER->id
+        );
         $bc->get_plan()->get_setting('users')->set_value($users);
         $backupid = $bc->get_backupid();
         $bc->execute_plan();
@@ -57,8 +63,14 @@ final class backup_restore_test extends \advanced_testcase {
         $file->extract_to_pathname(get_file_packer('application/vnd.moodle.backup'), $CFG->tempdir . '/backup/' . $backupid);
         $bc->destroy();
         $newcourseid = \restore_dbops::create_new_course('Restored', 'RST' . random_string(6), 1);
-        $rc = new \restore_controller($backupid, $newcourseid, \backup::INTERACTIVE_NO, \backup::MODE_GENERAL, $USER->id,
-            \backup::TARGET_NEW_COURSE);
+        $rc = new \restore_controller(
+            $backupid,
+            $newcourseid,
+            \backup::INTERACTIVE_NO,
+            \backup::MODE_GENERAL,
+            $USER->id,
+            \backup::TARGET_NEW_COURSE
+        );
         $rc->get_plan()->get_setting('users')->set_value($users);
         $rc->execute_precheck();
         $rc->execute_plan();
@@ -125,9 +137,13 @@ final class backup_restore_test extends \advanced_testcase {
         $this->assertEquals($validator->id, $row->get('validatorid'));
 
         $this->assertSame(validation_manager::STATE_VALIDATED, validation_manager::get_state(
-            $newcontroller->get_or_create_instance(0, get_admin()->id, $newgrade1->id), (int) $validator->id));
+            $newcontroller->get_or_create_instance(0, get_admin()->id, $newgrade1->id),
+            (int) $validator->id
+        ));
         $this->assertSame(validation_manager::STATE_PENDING, validation_manager::get_state(
-            $newcontroller->get_or_create_instance(0, $validator->id, $newgrade2->id), (int) $validator->id));
+            $newcontroller->get_or_create_instance(0, $validator->id, $newgrade2->id),
+            (int) $validator->id
+        ));
 
         // Without user data: weights yes, history no.
         $nousersid = $this->backup_restore($course->id, false);

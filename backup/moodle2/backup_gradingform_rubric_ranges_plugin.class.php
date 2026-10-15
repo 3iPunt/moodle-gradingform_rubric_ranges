@@ -72,9 +72,9 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin 
                 array('criterionid' => backup::VAR_PARENTID));
 
         // IED extension: weight of each criterion (part of the rubric design, copied with or without user data).
-        $weight = new backup_nested_element('rubric_ranges_weight', array('id'), array('weight'));
+        $weight = new backup_nested_element('rubric_ranges_weight', ['id'], ['weight']);
         $criterion->add_child($weight);
-        $weight->set_source_table('gradingform_rubric_ranges_w', array('criterionid' => backup::VAR_PARENTID));
+        $weight->set_source_table('gradingform_rubric_ranges_w', ['criterionid' => backup::VAR_PARENTID]);
 
         // No need to annotate ids or files yet (one day when criterion definition supports
         // Embedded files, they must be annotated here).
@@ -121,12 +121,12 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin 
         // IED extension: validation history (instances are only backed up with user data).
         // The persistent technical fields (usermodified, timecreated, timemodified) are regenerated on restore.
         $validations = new backup_nested_element('rubric_ranges_validations');
-        $validation = new backup_nested_element('rubric_ranges_validation', array('id'), array(
+        $validation = new backup_nested_element('rubric_ranges_validation', ['id'], [
             'itemid', 'criterionid', 'teacherlevelid', 'teachergrade', 'teacherremark', 'teacherremarkformat',
-            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated'));
+            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated']);
         $pluginwrapper->add_child($validations);
         $validations->add_child($validation);
-        $validation->set_source_table('gradingform_rubric_ranges_h', array('instanceid' => backup::VAR_PARENTID));
+        $validation->set_source_table('gradingform_rubric_ranges_h', ['instanceid' => backup::VAR_PARENTID]);
         $validation->annotate_ids('user', 'teacherid');
         $validation->annotate_ids('user', 'validatorid');
 
