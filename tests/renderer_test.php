@@ -171,5 +171,45 @@ final class renderer_test extends \advanced_testcase {
         $student = $renderer->display_instance($active, 0, false);
         $this->assertStringNotContainsString('validated', $student);
         $this->assertStringNotContainsString('Original grade', $student);
+
+        // Without the marking workflow the graders are warned that grades reach the students at once.
+        $this->assertStringContainsString('does not use the marking workflow', $validated);
+    }
+
+    /**
+     * With the marking workflow, a validated grade not published is editable for the validator only.
+     */
+    public function test_validated_pending_publication(): void {
+        global $PAGE;
+        $this->resetAfterTest();
+        $this->set_flags(false, true, true);
+        [$course, , $context, $controller, $assign] = $this->create_assign_with_rubric(null, [], ['markingworkflow' => 1]);
+        $ids = $this->criterion_ids($controller);
+        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'editingteacher');
+        $validator = $this->create_validator($course);
+        $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
+        $itemid = (int) $assign->get_user_grade($student->id, true)->id;
+        $this->grade_as($teacher, $controller, $itemid, $this->filling($ids, ['C1' => 65, 'C2' => 2], 'T1'));
+        $this->grade_as($validator, $controller, $itemid, $this->filling($ids, ['C1' => 80, 'C2' => 7], 'V1', true));
+
+        $PAGE->set_context($context);
+        $PAGE->set_url('/');
+        $render = function (\stdClass $user) use ($controller, $itemid) {
+            global $PAGE;
+            $this->setUser($user);
+            $instance = $controller->get_or_create_instance(0, $user->id, $itemid);
+            $element = new \MoodleQuickForm_grading('advancedgrading', 'Grade', ['gradinginstance' => $instance]);
+            return $instance->render_grading_element($PAGE, $element);
+        };
+        $forvalidator = $render($validator);
+        $this->assertStringContainsString('you can still correct it until it is released', $forvalidator);
+        $this->assertMatchesRegularExpression('/<input type="number" name="advancedgrading\[criteria\]\[' . $ids['C1'] .
+            '\]\[grade\]"[^>]*value="80"/', $forvalidator);
+        $this->assertStringContainsString('Original grade: 65', $forvalidator);
+        $this->assertStringNotContainsString('does not use the marking workflow', $forvalidator);
+
+        $forteacher = $render($teacher);
+        $this->assertStringContainsString('pending publication by the validator and cannot be changed', $forteacher);
+        $this->assertStringNotContainsString('type="number"', $forteacher);
     }
 }

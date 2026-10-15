@@ -34,6 +34,7 @@ use core_external\external_multiple_structure;
 use core_external\external_format_value;
 use gradingform_rubric_ranges\local\features;
 use gradingform_rubric_ranges\local\grade_calculator;
+use gradingform_rubric_ranges\local\publication;
 use gradingform_rubric_ranges\local\range_resolver;
 use gradingform_rubric_ranges\local\validation_manager;
 use gradingform_rubric_ranges\local\weights;
@@ -1099,18 +1100,25 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
         global $DB, $USER;
 
         $state = validation_manager::get_state($this, (int) $USER->id);
-        $emptyvalidation = $state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue);
+        $validating = in_array($state, [validation_manager::STATE_PENDING, validation_manager::STATE_VALIDATED_EDITABLE]);
+        $emptyvalidation = $validating && $this->is_empty_form($elementvalue);
         if (validation_manager::is_locked($state, $elementvalue) || $emptyvalidation) {
             return validation_manager::keep_current_grade($this);
         }
-        if ($state !== validation_manager::STATE_PENDING) {
+        if (!$validating) {
             return parent::submit_and_get_grade($elementvalue, $itemid);
         }
 
-        $teacher = validation_manager::get_current_graded_instance($this);
+        $current = validation_manager::get_current_graded_instance($this);
+        $previous = $current->get_rubric_filling()['criteria'];
         $transaction = $DB->start_delegated_transaction();
         $grade = parent::submit_and_get_grade($elementvalue, $itemid);
-        validation_manager::record_validation($this, $teacher, (int) $USER->id);
+        if ($state === validation_manager::STATE_PENDING) {
+            validation_manager::record_validation($this, $current, (int) $USER->id);
+        } else {
+            // Correction of a validated grade not published yet.
+            validation_manager::update_validation($this, $previous, (int) $USER->id);
+        }
         $transaction->allow_commit();
         return $grade;
     }
@@ -1260,8 +1268,17 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
         }
         // IED extension: academic validation states replace the editable rubric.
         $state = validation_manager::get_state($this, (int) $USER->id);
-        $validatable = $state === validation_manager::STATE_PENDING && !$gradingformelement->_flagFrozen;
-        if ($validatable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
+        $publication = publication::NO_WORKFLOW;
+        if ($state !== validation_manager::STATE_OFF) {
+            $publication = publication::status($this);
+            if ($publication === publication::NO_WORKFLOW) {
+                $warning = get_string('noworkflowwarning', 'gradingform_rubric_ranges');
+                $html .= $this->get_controller()->get_renderer($page)->notification($warning, 'warning');
+            }
+        }
+        $editable = !$gradingformelement->_flagFrozen
+            && in_array($state, [validation_manager::STATE_PENDING, validation_manager::STATE_VALIDATED_EDITABLE]);
+        if ($editable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
             if ($state === validation_manager::STATE_PENDING) {
                 $page->requires->js_call_amd('gradingform_rubric_ranges/validation', 'init', [$gradingformelement->getName()]);
             }
@@ -1272,7 +1289,8 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
                 $options,
                 $gradingformelement->getName(),
                 $value,
-                $history
+                $history,
+                $publication
             );
         }
         $html .= $this->get_controller()->get_renderer($page)->display_rubric(

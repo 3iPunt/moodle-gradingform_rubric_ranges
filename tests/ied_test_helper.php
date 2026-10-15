@@ -56,14 +56,15 @@ trait ied_test_helper {
      *
      * @param array|null $criteria criteria for the generator, the default rubric when null
      * @param array $weights criterion name => weight
+     * @param array $assignoptions extra settings of the assignment (e.g. markingworkflow)
      * @return array [course, cm, context, controller, assign]
      */
-    protected function create_assign_with_rubric(?array $criteria = null, array $weights = []): array {
+    protected function create_assign_with_rubric(?array $criteria = null, array $weights = [], array $assignoptions = []): array {
         // The upstream generator must run as a user.
         $this->setAdminUser();
         $generator = $this->getDataGenerator();
         $course = $generator->create_course();
-        $assignrecord = $generator->create_module('assign', ['course' => $course->id, 'grade' => 100]);
+        $assignrecord = $generator->create_module('assign', ['course' => $course->id, 'grade' => 100] + $assignoptions);
         $cm = get_coursemodule_from_instance('assign', $assignrecord->id);
         $context = \context_module::instance($cm->id);
         $controller = $generator->get_plugin_generator('gradingform_rubric_ranges')

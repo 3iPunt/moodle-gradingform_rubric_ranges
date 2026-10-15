@@ -25,8 +25,8 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'gradingform_rubric_ranges';
-$plugin->version  = 2024112201;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 1.
-$plugin->release  = '2024112200-ied1'; // IED fork of upstream release 2024112200.
+$plugin->version  = 2024112202;    // The current plugin version (Date: YYYYMMDDXX). IED fork: upstream + 2.
+$plugin->release  = '2024112200-ied2'; // IED fork of upstream release 2024112200.
 $plugin->requires = 2024100700;    // IED fork: requires Moodle 4.5 (the only version it is tested on).
 $plugin->maturity = MATURITY_STABLE;
 $plugin->supported = [405, 405];

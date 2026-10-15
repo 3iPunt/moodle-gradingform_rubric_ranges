@@ -18,6 +18,7 @@ namespace gradingform_rubric_ranges\local;
 
 use gradingform_instance;
 use gradingform_rubric_ranges\event\grade_validated;
+use gradingform_rubric_ranges\event\grade_validation_updated;
 use gradingform_rubric_ranges\persistent\validation_history;
 use gradingform_rubric_ranges_instance;
 
@@ -42,8 +43,11 @@ final class validation_manager {
     /** @var string User without the validate capability: upstream behaviour. */
     const STATE_NORMAL = 'normal';
 
-    /** @var string The grade is validated: read only for everybody. */
+    /** @var string The grade is validated and read only (published, no marking workflow, or not a validator). */
     const STATE_VALIDATED = 'validated';
+
+    /** @var string Validator and a validated grade not published yet: the validator can still correct it. */
+    const STATE_VALIDATED_EDITABLE = 'validatededitable';
 
     /** @var string Validator and the teacher has not graded yet: read only. */
     const STATE_NOT_GRADED = 'notgraded';
@@ -130,7 +134,7 @@ final class validation_manager {
         }
         $itemid = (int) $instance->get_data('itemid');
         if ($itemid && self::is_validated($itemid)) {
-            return self::STATE_VALIDATED;
+            return self::can_correct($instance, $userid, $itemid) ? self::STATE_VALIDATED_EDITABLE : self::STATE_VALIDATED;
         }
         if (!self::has_validate_capability($instance->get_controller()->get_context(), $userid)) {
             return self::STATE_NORMAL;
@@ -143,6 +147,27 @@ final class validation_manager {
             return self::STATE_SELF;
         }
         return self::STATE_PENDING;
+    }
+
+    /**
+     * Whether the user can still correct a validated grade: it is a validator who did not give the original grade,
+     * and the grade is not published yet (only possible with the marking workflow of mod_assign).
+     *
+     * @param gradingform_rubric_ranges_instance $instance
+     * @param int $userid
+     * @param int $itemid
+     * @return bool
+     */
+    private static function can_correct(gradingform_rubric_ranges_instance $instance, int $userid, int $itemid): bool {
+        if (!self::has_validate_capability($instance->get_controller()->get_context(), $userid)) {
+            return false;
+        }
+        $history = self::get_history($itemid);
+        $first = reset($history);
+        if ($first && (int) $first->get('teacherid') === $userid) {
+            return false;
+        }
+        return publication::status($instance) === publication::UNPUBLISHED;
     }
 
     /**
@@ -227,6 +252,72 @@ final class validation_manager {
                     'instanceid' => $instanceid,
                     'criteria' => count($controller->get_definition()->rubric_criteria),
                     'teacherid' => (int) $teacher->get_data('raterid'),
+                ],
+            ])->trigger();
+        }
+    }
+
+    /**
+     * Updates the validation history after a correction of the validator (before the grade is published).
+     *
+     * The original teacher grade is kept; the validated grade, level and feedback, the validator, the time and the
+     * instance are replaced by the latest ones. An event lists the changes of each criterion.
+     *
+     * @param gradingform_rubric_ranges_instance $corrected instance saved by the validator
+     * @param array $previous filling of the instance replaced by the correction (criterionid => filling)
+     * @param int $validatorid
+     */
+    public static function update_validation(
+        gradingform_rubric_ranges_instance $corrected,
+        array $previous,
+        int $validatorid
+    ): void {
+        $controller = $corrected->get_controller();
+        $itemid = (int) $corrected->get_data('itemid');
+        $instanceid = (int) $corrected->get_id();
+        $filling = $corrected->get_rubric_filling(true)['criteria'];
+        $now = time();
+
+        $changes = [];
+        $history = self::get_history($itemid);
+        foreach ($history as $criterionid => $record) {
+            $old = $previous[$criterionid] ?? [];
+            $new = $filling[$criterionid] ?? [];
+            $change = [
+                'criterionid' => (int) $criterionid,
+                'oldlevelid' => self::int_or_null($old['levelid'] ?? null),
+                'newlevelid' => self::int_or_null($new['levelid'] ?? null),
+                'oldgrade' => self::int_or_null($old['grade'] ?? null),
+                'newgrade' => self::int_or_null($new['grade'] ?? null),
+                'remarkchanged' => (string) ($old['remark'] ?? '') !== (string) ($new['remark'] ?? ''),
+            ];
+            $changed = $change['oldlevelid'] !== $change['newlevelid'] || $change['oldgrade'] !== $change['newgrade']
+                || $change['remarkchanged'];
+            // The history always points to the current instance; the validated values, the validator and the
+            // time only move when the criterion really changed (e.g. publishing without changes keeps them).
+            $record->set('instanceid', $instanceid);
+            if ($changed) {
+                $changes[] = $change;
+                $record->set_many([
+                    'validatedlevelid' => $change['newlevelid'],
+                    'validatedgrade' => $change['newgrade'],
+                    'validatedremark' => $new['remark'] ?? null,
+                    'validatorid' => $validatorid,
+                    'timevalidated' => $now,
+                ]);
+            }
+            $record->update();
+        }
+
+        if ($changes) {
+            grade_validation_updated::create([
+                'context' => $controller->get_context(),
+                'objectid' => reset($history)->get('id'),
+                'userid' => $validatorid,
+                'other' => [
+                    'itemid' => $itemid,
+                    'instanceid' => $instanceid,
+                    'changes' => $changes,
                 ],
             ])->trigger();
         }

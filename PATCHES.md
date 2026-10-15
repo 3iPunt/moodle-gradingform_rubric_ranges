@@ -16,7 +16,7 @@ Every feature is **disabled by default**. With all of them disabled the plugin b
 |---|---|
 | Upstream branch | `MOODLE_402_STABLE` |
 | Upstream commit | `2aece39` (release `2024112200`) |
-| Fork version | `2024112201` / `2024112200-ied1` |
+| Fork version | `2024112202` / `2024112200-ied2` (v1.1.0; v1.0.0 was `2024112201` / `2024112200-ied1`) |
 | Moodle | 4.5 LTS only (`requires = 2024100700`, `supported = [405, 405]`): the fork is only tested on 4.5 |
 
 ## Patch series
@@ -34,23 +34,31 @@ One commit per task, applied in order:
 | `0007-T6-…` | Privacy provider for the numeric grade, the validation history and the weights |
 | `0008-T7-…` | PHPUnit tests of the IED extension |
 | `0009-T8-…` | QA hardening: Moodle 4.5 only, escaping, end to end gradebook test, coding style of the fork lines, setup guide |
+| `0010-T9-…` | v1.1.0: publication with the marking workflow of mod_assign, validator corrections until publication, publication guard |
 
 ## Setting up the extension (site administrator)
 
 1. Apply the patches and run `php admin/cli/upgrade.php` (or visit *Site administration > Notifications*).
 2. Open `/grade/grading/form/rubric_ranges/settings_page.php` (also linked as "Ranged rubric settings" in the
    activity navigation of a ranged rubric) and enable the features needed: weighting, numeric grading, validation.
-3. For validation, create a validator role:
-   - *Site administration > Users > Permissions > Define roles > Add a new role*, based on the **Teacher** (or
-     Manager) archetype so it can grade the activity;
-   - allow `gradingform/rubric_ranges:validate`;
-   - assign it in the course (or category) to the validators. The validator must not be the teacher who grades:
-     a user cannot validate their own grade, and a validator cannot give the first grade.
-   - Site administrators are **not** validators unless they get this role.
-4. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
+3. For validation, set up the roles (publication uses the marking workflow of mod_assign):
+   - **Teacher and subject/module coordinator** (same level, they give the same first grade): they need
+     `mod/assign:grade` but **not** `mod/assign:reviewgrades` nor `mod/assign:releasegrades`. The standard
+     *Teacher* role has both by default: prohibit them in the role used by teachers and coordinators.
+   - **Validator**: a new role based on the **Teacher** (or Manager) archetype with `mod/assign:grade`,
+     `mod/assign:reviewgrades`, `mod/assign:releasegrades` and `gradingform/rubric_ranges:validate`.
+   - Assign the roles in the course (or category). The validator must not be the teacher who grades: a user cannot
+     validate their own grade, and a validator cannot give the first grade. Site administrators are **not**
+     validators unless they get the role.
+4. In each assignment graded with a ranged rubric and validation, enable **"Use marking workflow"**. Without it
+   grades reach the students as soon as they are saved (the grading form warns) and a validated grade is locked at
+   once (there is no publication step). Optionally enable **"Hide grader identity from students"**: otherwise the
+   student sees the validator as "Graded by" (native mod_assign field).
+5. In each ranged rubric, allow "text remarks for each criterion" so the level feedback can be proposed
    automatically (the rubric editor warns otherwise).
-5. Quick check: grade a student with the rubric, validate the grade with the validator, and check the gradebook and
-   the log (*Ranged rubric grade validated*).
+6. Quick check: the teacher grades and sets *Ready for review*; the validator validates (*Ready for release*),
+   corrects if needed and publishes (*Released*); the student sees only the validator grade and feedback after
+   publication. The log shows *Ranged rubric grade validated* and *Ranged rubric validated grade corrected*.
 
 ## Accepted limitations
 
@@ -63,6 +71,9 @@ One commit per task, applied in order:
 | The privacy export of the grading is keyed by criterion description | Upstream export contract |
 | Enabling or disabling weighting does not recalculate grades already in the gradebook | Only grades saved afterwards use the new setting |
 | The grader side panel PHPUnit tests error on Moodle 4.5 | Upstream issue (MDL-76583), see Tests |
+| Publication (and its guard) only exists in assignments | Other activities have no marking workflow; validated grades are locked at once |
+| A blocked publication from the single grading form may still send the "grade updated" notification if "Notify students" was ticked | mod_assign sends it after the state change; the student sees neither the grade nor the feedback |
+| The user who releases needs `mod/assign:reviewgrades` (or `managegrades`) for the guard to remove a blocked grade from the gradebook | mod_assign only updates the gradebook for workflow states the user can set |
 | `moodle-cs` reports errors in upstream code | Upstream predates the current standard; only the lines added by the fork are kept clean (except a few lines inside upstream constructs and the language strings kept as a block at the end of the file to reduce patch conflicts) |
 
 ## Generating the patches
@@ -157,15 +168,30 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
 
 ## Notes on academic validation
 
-- A grade (grading item) can be validated **once**, optionally, by a user with
+- **v1.1.0, with the marking workflow of mod_assign** (recommended setup):
+  - teacher or coordinator grade (one shared grade) → *Ready for review*;
+  - the validator validates → the grade is **validated, pending publication** (*Ready for release*): the validator
+    can correct it as many times as needed; the teacher can no longer change it;
+  - the validator publishes (*Released*, one by one or in bulk): the student sees the validator grade and
+    feedback; from then on **nobody can change it**;
+  - before publication the student sees nothing and the gradebook is empty (native mod_assign behaviour);
+  - each correction keeps the original teacher grade, stores the latest validator grade, level, feedback, validator
+    and date, and triggers `grade_validation_updated` with the previous and new values;
+  - a grade **cannot be released before it is validated**, from the grading form, quick grading or the bulk action:
+    the plugin sets it back to *Ready for release* (mod_assign removes it from the gradebook), warns and triggers
+    `grade_publication_blocked`. Validating and releasing in the same save is allowed.
+- Without the marking workflow (or in other activities) the v1.0.0 rules apply: the validated grade is locked at
+  once, and the grading form warns that grades reach the students as soon as they are saved.
+- A grade (grading item) can be validated, optionally, by a user with
   `gradingform/rubric_ranges:validate` who is not the grader of the current grade (no self validation).
 - Site administrators are **not** validators by default: the capability is checked without "do anything",
   so they need a role that grants it explicitly.
 - Flow: the teacher grades; the validator opens the grading form, sees the teacher grade read only and clicks
   "Validate"; the validator grade and feedback replace the teacher ones and the original teacher grade, level
   and feedback are kept in `gradingform_rubric_ranges_h` with the validator and the date.
-- A grade is validated when it has history. Then it is read only for everybody: any submission is ignored and
-  the current grade is kept (an empty submission never wipes it).
+- A grade is validated when it has history. Then it is read only (for the validator too once published, or at once
+  without marking workflow): any submission is ignored and the current grade is kept (an empty submission never
+  wipes it).
 - A validator cannot give the first grade: when the teacher has not graded yet, the rubric is read only.
 - Saving without clicking "Validate" keeps the teacher grade.
 - Graders see "Grade validated by…" and the original grade of each criterion; students do not see the validation.

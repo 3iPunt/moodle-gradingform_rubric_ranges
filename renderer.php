@@ -23,6 +23,7 @@
  */
 
 use gradingform_rubric_ranges\local\features;
+use gradingform_rubric_ranges\local\publication;
 use gradingform_rubric_ranges\local\range_resolver;
 use gradingform_rubric_ranges\local\validation_manager;
 use gradingform_rubric_ranges\local\weights;
@@ -857,7 +858,7 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
         // IED extension: graders see the validation of the grade, students do not.
         if ($cangrade && features::validation_enabled()) {
             $history = validation_manager::get_history((int) $instance->get_data('itemid'));
-            $output .= $this->validation_badge($history);
+            $output .= $this->validation_badge($history, publication::status($instance));
             $values = $this->add_validation_values($values, $criteria, $history);
         }
         if ($showdescription) {
@@ -1065,13 +1066,32 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
      * @param string $elementname grading element name
      * @param array|null $values current filling
      * @param array $history validation history (criterionid => validation_history)
+     * @param string $publication publication state (publication::NO_WORKFLOW, UNPUBLISHED or PUBLISHED)
      * @return string
      */
-    public function display_validation_element($state, $criteria, $options, $elementname, $values, $history) {
+    public function display_validation_element(
+        $state,
+        $criteria,
+        $options,
+        $elementname,
+        $values,
+        $history,
+        $publication = publication::NO_WORKFLOW
+    ) {
         $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
         switch ($state) {
+            case validation_manager::STATE_VALIDATED_EDITABLE:
+                // The validator can still correct the grade until it is published.
+                return $this->validation_badge($history, $publication, true) . $this->display_rubric(
+                    $criteria,
+                    $options,
+                    gradingform_rubric_ranges_controller::DISPLAY_EVAL,
+                    $elementname,
+                    $this->add_validation_values($values, $criteria, $history)
+                );
+
             case validation_manager::STATE_VALIDATED:
-                return $this->validation_badge($history) . $this->display_rubric(
+                return $this->validation_badge($history, $publication) . $this->display_rubric(
                     $criteria,
                     $options,
                     $review,
@@ -1118,12 +1138,14 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
     }
 
     /**
-     * IED extension: returns the badge telling who validated the grade and when.
+     * IED extension: returns the badge telling who validated the grade, when, and whether it is published.
      *
      * @param array $history validation history (criterionid => validation_history)
+     * @param string $publication publication state (publication::NO_WORKFLOW, UNPUBLISHED or PUBLISHED)
+     * @param bool $editable whether the current user can still correct the grade
      * @return string
      */
-    protected function validation_badge($history) {
+    protected function validation_badge($history, $publication = publication::NO_WORKFLOW, $editable = false) {
         if (empty($history)) {
             return '';
         }
@@ -1132,7 +1154,17 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
             'validator' => s($this->user_fullname($record->get('validatorid'))),
             'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
         ];
-        return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
+        if ($editable) {
+            $key = 'validatededitable';
+        } else if ($publication === publication::UNPUBLISHED) {
+            $key = 'validatedpending';
+        } else if ($publication === publication::PUBLISHED) {
+            $key = 'validatedpublished';
+        } else {
+            $key = 'validatedby';
+        }
+        $type = $editable || $publication === publication::UNPUBLISHED ? 'info' : 'success';
+        return $this->output->notification(get_string($key, 'gradingform_rubric_ranges', $a), $type, false);
     }
 
     /**
@@ -1172,8 +1204,10 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
      * @return string
      */
     protected function validation_template($mode, $value) {
-        $review = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
-        if (!$review || !is_array($value) || empty($value['validation'])) {
+        // Review, and evaluation while the validator corrects a validated grade.
+        $shown = $mode == gradingform_rubric_ranges_controller::DISPLAY_REVIEW
+            || $mode == gradingform_rubric_ranges_controller::DISPLAY_EVAL;
+        if (!$shown || !is_array($value) || empty($value['validation'])) {
             return '';
         }
         $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
