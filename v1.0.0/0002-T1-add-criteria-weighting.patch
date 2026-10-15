@@ -1,0 +1,660 @@
+From 44df1120093471db9c6e81a42e8240824b655bc3 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 12:21:20 +0200
+Subject: [PATCH 2/9] T1: add criteria weighting
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Weight from 1 to 10 per criterion, stored through the criterion_weight
+  persistent (business rules in local\weights). Criteria without a stored
+  weight weigh 1, so existing rubrics need no migration.
+- Weights are only saved when submitted: disabling the feature keeps them.
+- Changing a weight in a rubric already used for grading requires regrade.
+- Editor: weight selector and live percentage (AMD weights_editor, the
+  upstream YUI editor is untouched). Graders see "Weight x · y %",
+  students do not see weights.
+- Fix upstream: update_definition() and edit.php read $data->rubric
+  instead of $data->rubricranges, so instances were never marked for
+  regrade.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                            |  20 ++++
+ amd/build/weights_editor.min.js       |  14 +++
+ amd/build/weights_editor.min.js.map   |   1 +
+ amd/src/weights_editor.js             | 137 +++++++++++++++++++++++++
+ classes/local/weights.php             | 140 ++++++++++++++++++++++++++
+ edit.php                              |   2 +-
+ lang/en/gradingform_rubric_ranges.php |   3 +
+ lib.php                               |  25 ++++-
+ renderer.php                          |  72 ++++++++++++-
+ rubricrangeseditor.php                |   9 ++
+ styles.css                            |  20 ++++
+ 11 files changed, 440 insertions(+), 3 deletions(-)
+ create mode 100644 amd/build/weights_editor.min.js
+ create mode 100644 amd/build/weights_editor.min.js.map
+ create mode 100644 amd/src/weights_editor.js
+ create mode 100644 classes/local/weights.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index b33dc28..401c1de 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -26,6 +26,7 @@ One commit per task, applied in order:
+ | Patch | Content |
+ |---|---|
+ | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
++| `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -79,6 +80,25 @@ Core does not load `settings.php` for `gradingform` plugins, so the feature flag
+ 
+ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes made in the page are recorded in the config changes report.
+ 
++## Notes on criteria weighting
++
++- Criteria without a stored weight weigh 1, so existing rubrics need no migration.
++- Weights are only saved when they are submitted: disabling the feature keeps the configured weights.
++- Changing a weight in a rubric already used for grading requires regrading.
++- Enabling or disabling the feature does **not** recalculate grades already sent to the gradebook; it only
++  applies to grades saved afterwards.
++- Weights are only shown to graders and rubric managers, never to students.
++
++## Upstream fixes included
++
++- `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
++  marked for regrade. Same field name fix in `edit.php` for the `lockzeropoints` warning.
++
++## Data access
++
++Tables added by the fork are accessed only through `\core\persistent` classes (`classes/persistent`);
++business rules live in `classes/local`.
++
+ ## Capability
+ 
+ `gradingform/rubric_ranges:validate` (module context). It is not granted to any archetype: grant it to the validator role, which must also be able to grade the activity (e.g. a copy of the teacher or manager role).
+diff --git a/amd/build/weights_editor.min.js b/amd/build/weights_editor.min.js
+new file mode 100644
+index 0000000..936911b
+--- /dev/null
++++ b/amd/build/weights_editor.min.js
+@@ -0,0 +1,14 @@
++define("gradingform_rubric_ranges/weights_editor",["exports","core/str"],(function(_exports,_str){Object.defineProperty(_exports,"__esModule",{value:!0}),_exports.init=void 0;
++/**
++   * IED extension: live weight percentages in the ranged rubric editor.
++   *
++   * Works next to the upstream YUI editor (js/rubricrangeseditor.js) without modifying it:
++   * criteria added, duplicated or deleted by YUI are detected with a MutationObserver.
++   *
++   * @module     gradingform_rubric_ranges/weights_editor
++   * @copyright  2026 Tresipunt
++   * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++   */
++const SELECTORS_WEIGHT="select.weightselect",SELECTORS_PERCENT=".weightpercent",SELECTORS_CRITERION="tr.criterion";let percentTemplate="{$a} %",decimalSeparator=".";const recalculate=root=>{const selects=Array.from(root.querySelectorAll(SELECTORS_WEIGHT)),total=selects.reduce(((sum,select)=>sum+(parseInt(select.value,10)||0)),0);selects.forEach((select=>{var _select$closest;const percent=null===(_select$closest=select.closest(".weight"))||void 0===_select$closest?void 0:_select$closest.querySelector(SELECTORS_PERCENT);if(percent){const weight=parseInt(select.value,10)||0,text=total?(value=>{const formatted=String(Math.round(10*value)/10).replace(".",decimalSeparator);return percentTemplate.replace("{$a}",formatted)})(weight/total*100):"";percent.textContent!==text&&(percent.textContent=text)}}))};_exports.init=async name=>{const root=document.getElementById("rubric-".concat(name));if(!root)return;try{[percentTemplate,decimalSeparator]=await(0,_str.getStrings)([{key:"weightpercent",component:"gradingform_rubric_ranges",param:"{$a}"},{key:"decsep",component:"langconfig"}])}catch(e){}root.addEventListener("change",(e=>{e.target.matches(SELECTORS_WEIGHT)&&recalculate(root)})),root.addEventListener("click",(e=>{e.target.matches('input[type=submit][id$="-duplicate"]')&&(((root,button)=>{var _button$closest;const source=null===(_button$closest=button.closest(SELECTORS_CRITERION))||void 0===_button$closest?void 0:_button$closest.querySelector(SELECTORS_WEIGHT),criteria=root.querySelectorAll(SELECTORS_CRITERION),target=criteria.length?criteria[criteria.length-1].querySelector(SELECTORS_WEIGHT):null;source&&target&&source!==target&&(target.value=source.value)})(root,e.target),recalculate(root))}));let scheduled=!1;new MutationObserver((()=>{scheduled||(scheduled=!0,window.requestAnimationFrame((()=>{scheduled=!1,recalculate(root)})))})).observe(root,{childList:!0,subtree:!0}),recalculate(root)}}));
++
++//# sourceMappingURL=weights_editor.min.js.map
+\ No newline at end of file
+diff --git a/amd/build/weights_editor.min.js.map b/amd/build/weights_editor.min.js.map
+new file mode 100644
+index 0000000..e658df6
+--- /dev/null
++++ b/amd/build/weights_editor.min.js.map
+@@ -0,0 +1 @@
++{"version":3,"file":"weights_editor.min.js","sources":["../src/weights_editor.js"],"sourcesContent":["// This file is part of Moodle - http://moodle.org/\n//\n// Moodle is free software: you can redistribute it and/or modify\n// it under the terms of the GNU General Public License as published by\n// the Free Software Foundation, either version 3 of the License, or\n// (at your option) any later version.\n//\n// Moodle is distributed in the hope that it will be useful,\n// but WITHOUT ANY WARRANTY; without even the implied warranty of\n// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n// GNU General Public License for more details.\n//\n// You should have received a copy of the GNU General Public License\n// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.\n\n/**\n * IED extension: live weight percentages in the ranged rubric editor.\n *\n * Works next to the upstream YUI editor (js/rubricrangeseditor.js) without modifying it:\n * criteria added, duplicated or deleted by YUI are detected with a MutationObserver.\n *\n * @module     gradingform_rubric_ranges/weights_editor\n * @copyright  2026 Tresipunt\n * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later\n */\n\nimport {getStrings} from 'core/str';\n\nconst SELECTORS = {\n    WEIGHT: 'select.weightselect',\n    PERCENT: '.weightpercent',\n    CRITERION: 'tr.criterion',\n};\n\n/** @type {string} Template of the percentage string, with a placeholder for the value. */\nlet percentTemplate = '{$a} %';\n\n/** @type {string} Decimal separator of the current language. */\nlet decimalSeparator = '.';\n\n/**\n * Formats a percentage with one decimal, removing trailing zeros.\n *\n * @param {Number} value\n * @returns {String}\n */\nconst formatPercent = (value) => {\n    const formatted = String(Math.round(value * 10) / 10).replace('.', decimalSeparator);\n    return percentTemplate.replace('{$a}', formatted);\n};\n\n/**\n * Recalculates the percentage of every criterion of the rubric.\n *\n * @param {HTMLElement} root the rubric editor container\n */\nconst recalculate = (root) => {\n    const selects = Array.from(root.querySelectorAll(SELECTORS.WEIGHT));\n    const total = selects.reduce((sum, select) => sum + (parseInt(select.value, 10) || 0), 0);\n    selects.forEach((select) => {\n        const percent = select.closest('.weight')?.querySelector(SELECTORS.PERCENT);\n        if (percent) {\n            const weight = parseInt(select.value, 10) || 0;\n            const text = total ? formatPercent(weight / total * 100) : '';\n            // Only write when changed: writing always would retrigger the MutationObserver endlessly.\n            if (percent.textContent !== text) {\n                percent.textContent = text;\n            }\n        }\n    });\n};\n\n/**\n * Copies the weight of the duplicated criterion to the new one (YUI creates it with the default weight).\n *\n * The YUI handler is attached to the button itself, so when the click bubbles here the new row already exists.\n *\n * @param {HTMLElement} root the rubric editor container\n * @param {HTMLElement} button the duplicate button\n */\nconst copyDuplicatedWeight = (root, button) => {\n    const source = button.closest(SELECTORS.CRITERION)?.querySelector(SELECTORS.WEIGHT);\n    const criteria = root.querySelectorAll(SELECTORS.CRITERION);\n    const target = criteria.length ? criteria[criteria.length - 1].querySelector(SELECTORS.WEIGHT) : null;\n    if (source && target && source !== target) {\n        target.value = source.value;\n    }\n};\n\n/**\n * Initialises the weights editor.\n *\n * @param {String} name the rubric editor element name\n */\nexport const init = async(name) => {\n    const root = document.getElementById(`rubric-${name}`);\n    if (!root) {\n        return;\n    }\n\n    try {\n        [percentTemplate, decimalSeparator] = await getStrings([\n            {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},\n            {key: 'decsep', component: 'langconfig'},\n        ]);\n    } catch (e) {\n        // Keep the defaults.\n    }\n\n    root.addEventListener('change', (e) => {\n        if (e.target.matches(SELECTORS.WEIGHT)) {\n            recalculate(root);\n        }\n    });\n\n    root.addEventListener('click', (e) => {\n        if (e.target.matches('input[type=submit][id$=\"-duplicate\"]')) {\n            copyDuplicatedWeight(root, e.target);\n            recalculate(root);\n        }\n    });\n\n    // Criteria added or deleted by the YUI editor (deletion happens after a confirmation dialog).\n    let scheduled = false;\n    const observer = new MutationObserver(() => {\n        if (!scheduled) {\n            scheduled = true;\n            window.requestAnimationFrame(() => {\n                scheduled = false;\n                recalculate(root);\n            });\n        }\n    });\n    observer.observe(root, {childList: true, subtree: true});\n\n    recalculate(root);\n};\n"],"names":["SELECTORS","percentTemplate","decimalSeparator","recalculate","root","selects","Array","from","querySelectorAll","total","reduce","sum","select","parseInt","value","forEach","percent","closest","_select$closest","querySelector","weight","text","formatted","String","Math","round","replace","formatPercent","textContent","async","document","getElementById","name","key","component","param","e","addEventListener","target","matches","button","source","_button$closest","criteria","length","copyDuplicatedWeight","scheduled","MutationObserver","window","requestAnimationFrame","observe","childList","subtree"],"mappings":";;;;;;;;;;;MA4BMA,iBACM,sBADNA,kBAEO,iBAFPA,oBAGS,mBAIXC,gBAAkB,SAGlBC,iBAAmB,UAkBjBC,YAAeC,aACXC,QAAUC,MAAMC,KAAKH,KAAKI,iBAAiBR,mBAC3CS,MAAQJ,QAAQK,QAAO,CAACC,IAAKC,SAAWD,KAAOE,SAASD,OAAOE,MAAO,KAAO,IAAI,GACvFT,QAAQU,SAASH,mCACPI,gCAAUJ,OAAOK,QAAQ,6CAAfC,gBAA2BC,cAAcnB,sBACrDgB,QAAS,OACHI,OAASP,SAASD,OAAOE,MAAO,KAAO,EACvCO,KAAOZ,MAjBFK,CAAAA,cACbQ,UAAYC,OAAOC,KAAKC,MAAc,GAARX,OAAc,IAAIY,QAAQ,IAAKxB,yBAC5DD,gBAAgByB,QAAQ,OAAQJ,YAeVK,CAAcP,OAASX,MAAQ,KAAO,GAEvDO,QAAQY,cAAgBP,OACxBL,QAAQY,YAAcP,yBA4BlBQ,MAAAA,aACVzB,KAAO0B,SAASC,gCAAyBC,WAC1C5B,iBAKAH,gBAAiBC,wBAA0B,mBAAW,CACnD,CAAC+B,IAAK,gBAAiBC,UAAW,4BAA6BC,MAAO,QACtE,CAACF,IAAK,SAAUC,UAAW,gBAEjC,MAAOE,IAIThC,KAAKiC,iBAAiB,UAAWD,IACzBA,EAAEE,OAAOC,QAAQvC,mBACjBG,YAAYC,SAIpBA,KAAKiC,iBAAiB,SAAUD,IACxBA,EAAEE,OAAOC,QAAQ,0CApCA,EAACnC,KAAMoC,oCAC1BC,+BAASD,OAAOvB,QAAQjB,uDAAf0C,gBAAqCvB,cAAcnB,kBAC5D2C,SAAWvC,KAAKI,iBAAiBR,qBACjCsC,OAASK,SAASC,OAASD,SAASA,SAASC,OAAS,GAAGzB,cAAcnB,kBAAoB,KAC7FyC,QAAUH,QAAUG,SAAWH,SAC/BA,OAAOxB,MAAQ2B,OAAO3B,QAgClB+B,CAAqBzC,KAAMgC,EAAEE,QAC7BnC,YAAYC,cAKhB0C,WAAY,EACC,IAAIC,kBAAiB,KAC7BD,YACDA,WAAY,EACZE,OAAOC,uBAAsB,KACzBH,WAAY,EACZ3C,YAAYC,aAIf8C,QAAQ9C,KAAM,CAAC+C,WAAW,EAAMC,SAAS,IAElDjD,YAAYC"}
+\ No newline at end of file
+diff --git a/amd/src/weights_editor.js b/amd/src/weights_editor.js
+new file mode 100644
+index 0000000..72c5833
+--- /dev/null
++++ b/amd/src/weights_editor.js
+@@ -0,0 +1,137 @@
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * IED extension: live weight percentages in the ranged rubric editor.
++ *
++ * Works next to the upstream YUI editor (js/rubricrangeseditor.js) without modifying it:
++ * criteria added, duplicated or deleted by YUI are detected with a MutationObserver.
++ *
++ * @module     gradingform_rubric_ranges/weights_editor
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++import {getStrings} from 'core/str';
++
++const SELECTORS = {
++    WEIGHT: 'select.weightselect',
++    PERCENT: '.weightpercent',
++    CRITERION: 'tr.criterion',
++};
++
++/** @type {string} Template of the percentage string, with a placeholder for the value. */
++let percentTemplate = '{$a} %';
++
++/** @type {string} Decimal separator of the current language. */
++let decimalSeparator = '.';
++
++/**
++ * Formats a percentage with one decimal, removing trailing zeros.
++ *
++ * @param {Number} value
++ * @returns {String}
++ */
++const formatPercent = (value) => {
++    const formatted = String(Math.round(value * 10) / 10).replace('.', decimalSeparator);
++    return percentTemplate.replace('{$a}', formatted);
++};
++
++/**
++ * Recalculates the percentage of every criterion of the rubric.
++ *
++ * @param {HTMLElement} root the rubric editor container
++ */
++const recalculate = (root) => {
++    const selects = Array.from(root.querySelectorAll(SELECTORS.WEIGHT));
++    const total = selects.reduce((sum, select) => sum + (parseInt(select.value, 10) || 0), 0);
++    selects.forEach((select) => {
++        const percent = select.closest('.weight')?.querySelector(SELECTORS.PERCENT);
++        if (percent) {
++            const weight = parseInt(select.value, 10) || 0;
++            const text = total ? formatPercent(weight / total * 100) : '';
++            // Only write when changed: writing always would retrigger the MutationObserver endlessly.
++            if (percent.textContent !== text) {
++                percent.textContent = text;
++            }
++        }
++    });
++};
++
++/**
++ * Copies the weight of the duplicated criterion to the new one (YUI creates it with the default weight).
++ *
++ * The YUI handler is attached to the button itself, so when the click bubbles here the new row already exists.
++ *
++ * @param {HTMLElement} root the rubric editor container
++ * @param {HTMLElement} button the duplicate button
++ */
++const copyDuplicatedWeight = (root, button) => {
++    const source = button.closest(SELECTORS.CRITERION)?.querySelector(SELECTORS.WEIGHT);
++    const criteria = root.querySelectorAll(SELECTORS.CRITERION);
++    const target = criteria.length ? criteria[criteria.length - 1].querySelector(SELECTORS.WEIGHT) : null;
++    if (source && target && source !== target) {
++        target.value = source.value;
++    }
++};
++
++/**
++ * Initialises the weights editor.
++ *
++ * @param {String} name the rubric editor element name
++ */
++export const init = async(name) => {
++    const root = document.getElementById(`rubric-${name}`);
++    if (!root) {
++        return;
++    }
++
++    try {
++        [percentTemplate, decimalSeparator] = await getStrings([
++            {key: 'weightpercent', component: 'gradingform_rubric_ranges', param: '{$a}'},
++            {key: 'decsep', component: 'langconfig'},
++        ]);
++    } catch (e) {
++        // Keep the defaults.
++    }
++
++    root.addEventListener('change', (e) => {
++        if (e.target.matches(SELECTORS.WEIGHT)) {
++            recalculate(root);
++        }
++    });
++
++    root.addEventListener('click', (e) => {
++        if (e.target.matches('input[type=submit][id$="-duplicate"]')) {
++            copyDuplicatedWeight(root, e.target);
++            recalculate(root);
++        }
++    });
++
++    // Criteria added or deleted by the YUI editor (deletion happens after a confirmation dialog).
++    let scheduled = false;
++    const observer = new MutationObserver(() => {
++        if (!scheduled) {
++            scheduled = true;
++            window.requestAnimationFrame(() => {
++                scheduled = false;
++                recalculate(root);
++            });
++        }
++    });
++    observer.observe(root, {childList: true, subtree: true});
++
++    recalculate(root);
++};
+diff --git a/classes/local/weights.php b/classes/local/weights.php
+new file mode 100644
+index 0000000..615cd28
+--- /dev/null
++++ b/classes/local/weights.php
+@@ -0,0 +1,140 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++use gradingform_rubric_ranges\persistent\criterion_weight;
++
++/**
++ * Business rules for the weight of each criterion.
++ *
++ * Criteria without a stored weight (e.g. rubrics created before the extension) weigh DEFAULT.
++ * Callers only save a weight when it comes in the submitted data, so disabling the feature never
++ * resets the configured weights.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class weights {
++
++    /** @var int Minimum weight. */
++    const MIN = 1;
++
++    /** @var int Maximum weight. */
++    const MAX = 10;
++
++    /** @var int Weight of a criterion without stored weight. */
++    const DEFAULT = 1;
++
++    /**
++     * Normalises any value to a valid weight.
++     *
++     * @param mixed $value
++     * @return int
++     */
++    public static function clamp($value): int {
++        if (!is_numeric($value)) {
++            return self::DEFAULT;
++        }
++        return max(self::MIN, min(self::MAX, (int) $value));
++    }
++
++    /**
++     * Loads the weights of the given criteria.
++     *
++     * @param int[] $criterionids
++     * @return int[] criterionid => weight, DEFAULT for criteria without stored weight
++     */
++    public static function load(array $criterionids): array {
++        if (empty($criterionids)) {
++            return [];
++        }
++        $weights = array_fill_keys($criterionids, self::DEFAULT);
++        foreach (self::get_persistents($criterionids) as $persistent) {
++            $weights[$persistent->get('criterionid')] = (int) $persistent->get('weight');
++        }
++        return $weights;
++    }
++
++    /**
++     * Stores the weight of a criterion.
++     *
++     * @param int $criterionid
++     * @param mixed $weight
++     */
++    public static function save(int $criterionid, $weight): void {
++        $weight = self::clamp($weight);
++        $persistent = criterion_weight::get_record(['criterionid' => $criterionid]);
++        if ($persistent) {
++            if ((int) $persistent->get('weight') !== $weight) {
++                $persistent->set('weight', $weight);
++                $persistent->update();
++            }
++        } else {
++            $persistent = new criterion_weight(0, (object) ['criterionid' => $criterionid, 'weight' => $weight]);
++            $persistent->create();
++        }
++    }
++
++    /**
++     * Deletes the weights of the given criteria.
++     *
++     * @param int[] $criterionids
++     */
++    public static function delete_for_criteria(array $criterionids): void {
++        foreach (self::get_persistents($criterionids) as $persistent) {
++            $persistent->delete();
++        }
++    }
++
++    /**
++     * Calculates the percentage of each criterion over the total weight.
++     *
++     * @param array $criteria criterionid => criterion data (optionally with 'weight')
++     * @return float[] criterionid => percentage rounded to 1 decimal
++     */
++    public static function percentages(array $criteria): array {
++        $weights = [];
++        foreach ($criteria as $id => $criterion) {
++            $weights[$id] = self::clamp($criterion['weight'] ?? self::DEFAULT);
++        }
++        $total = array_sum($weights);
++        $percentages = [];
++        foreach ($weights as $id => $weight) {
++            $percentages[$id] = $total ? round($weight / $total * 100, 1) : 0.0;
++        }
++        return $percentages;
++    }
++
++    /**
++     * Returns the stored weight persistents of the given criteria.
++     *
++     * @param int[] $criterionids
++     * @return criterion_weight[]
++     */
++    private static function get_persistents(array $criterionids): array {
++        global $DB;
++
++        $criterionids = array_filter(array_map('intval', $criterionids));
++        if (empty($criterionids)) {
++            return [];
++        }
++        // Only builds the SQL fragment, the query is run by the persistent.
++        [$insql, $params] = $DB->get_in_or_equal($criterionids, SQL_PARAMS_NAMED);
++        return criterion_weight::get_records_select("criterionid $insql", $params);
++    }
++}
+diff --git a/edit.php b/edit.php
+index 0a65b86..fcc28db 100644
+--- a/edit.php
++++ b/edit.php
+@@ -67,7 +67,7 @@ if ($mform->is_cancelled()) {
+     // If we do not go back to management url and the minscore warning needs to be displayed, display it during redirection.
+     $warning = null;
+     if (!empty($data->returnurl) && $data->returnurl !== $manager->get_management_url()->out(false)) {
+-        if (empty($data->rubric['options']['lockzeropoints']) &&
++        if (empty($data->rubricranges['options']['lockzeropoints']) &&
+             ($scores = $controller->get_min_max_score()) &&
+             $scores['minscore'] <> 0) {
+             $warning = get_string('zerolevelsabsent', 'gradingform_rubric_ranges').'<br>'.
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index 9c4adb9..dc18211 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -120,3 +120,6 @@ $string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
+ $string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
+ $string['settingspage'] = 'Ranged rubric settings';
+ $string['settingssaved'] = 'Changes saved';
++$string['weight'] = 'Weight';
++$string['weightpercent'] = '{$a} %';
++$string['weightsummary'] = 'Weight {$a->weight} · {$a->percent} %';
+diff --git a/lib.php b/lib.php
+index edc8e8f..908de3b 100644
+--- a/lib.php
++++ b/lib.php
+@@ -32,6 +32,7 @@ use core_external\external_value;
+ use core_external\external_single_structure;
+ use core_external\external_multiple_structure;
+ use core_external\external_format_value;
++use gradingform_rubric_ranges\local\weights;
+ 
+ /** rubric: Used to compare our gradeitem_type against. */
+ const RUBRIC_RANGES = 'rubric_ranges';
+@@ -116,7 +117,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+      */
+     public function update_definition(stdClass $newdefinition, $usermodified = null) {
+         $this->update_or_check_rubric($newdefinition, $usermodified, true);
+-        if (isset($newdefinition->rubric['regrade']) && $newdefinition->rubric['regrade']) {
++        if (isset($newdefinition->rubricranges['regrade']) && $newdefinition->rubricranges['regrade']) {
+             $this->mark_for_regrade();
+         }
+     }
+@@ -198,6 +199,10 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+ 
+                 if ($doupdate) {
+                     $id = $DB->insert_record('gradingform_rubric_ranges_c', $data);
++                    // IED extension: weight is only saved when submitted (weighting enabled).
++                    if (array_key_exists('weight', $criterion)) {
++                        weights::save($id, $criterion['weight']);
++                    }
+                 }
+                 $haschanges[5] = true;
+             } else {
+@@ -216,6 +221,14 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+                     }
+                     $haschanges[1] = true;
+                 }
++                // IED extension: a weight change affects the grade, students require re-grading.
++                if (array_key_exists('weight', $criterion)
++                        && weights::clamp($criterion['weight']) != $currentcriteria[$id]['weight']) {
++                    if ($doupdate) {
++                        weights::save($id, $criterion['weight']);
++                    }
++                    $haschanges[3] = true;
++                }
+                 // Remove deleted levels from DB and calculate the maximum score for this criteria.
+                 foreach ($currentcriteria[$id]['levels'] as $levelid => $currentlevel) {
+                     if ($criterionmaxscore === null || $criterionmaxscore < $currentlevel['score']) {
+@@ -282,6 +295,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+                     if ($id > 0) {
+                         $DB->delete_records('gradingform_rubric_ranges_c', array('id' => $id));
+                         $DB->delete_records('gradingform_rubric_ranges_l', array('criterionid' => $id));
++                        weights::delete_for_criteria([$id]);
+                     }
+                 }
+                 $haschanges[3] = true;
+@@ -380,6 +394,13 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+         }
+ 
+         $rs->close();
++        // IED extension: criteria weights (always loaded so copy, backup and grading see the real value).
++        if ($this->definition && !empty($this->definition->rubric_criteria)) {
++            $criteriaweights = weights::load(array_keys($this->definition->rubric_criteria));
++            foreach ($criteriaweights as $rcid => $weight) {
++                $this->definition->rubric_criteria[$rcid]['weight'] = $weight;
++            }
++        }
+         $options = $this->get_options();
+         if (!$options['sortlevelsasc']) {
+             if ($this->definition) {
+@@ -701,6 +722,8 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+             array('definitionid' => $this->definition->id), '', 'id'));
+         // Delete levels.
+         $DB->delete_records_list('gradingform_rubric_ranges_l', 'criterionid', $criteria);
++        // IED extension: delete weights.
++        weights::delete_for_criteria($criteria);
+         // Delete critera.
+         $DB->delete_records_list('gradingform_rubric_ranges_c', 'id', $criteria);
+     }
+diff --git a/renderer.php b/renderer.php
+index 1200aba..ac1f876 100644
+--- a/renderer.php
++++ b/renderer.php
+@@ -21,6 +21,17 @@
+  * @copyright  2011 Marina Glancy
+  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+  */
++
++use gradingform_rubric_ranges\local\features;
++use gradingform_rubric_ranges\local\weights;
++
++/**
++ * Renderer used for displaying rubric
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2011 Marina Glancy
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
+ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+ 
+     /**
+@@ -157,7 +168,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         }
+ 
+         // Description cell.
+-        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate.$description, $descriptiontdparams);
++        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description,
++            $descriptiontdparams);
+ 
+         // Levels table.
+         $levelsrowparams = array('id' => '{NAME}-criteria-{CRITERION-id}-levels');
+@@ -715,9 +727,12 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+     public function display_rubric($criteria, $options, $mode, $elementname = null, $values = null) {
+         $criteriastr = '';
+         $cnt = 0;
++        // IED extension: weight percentages.
++        $weightpercentages = features::weighting_enabled() ? weights::percentages($criteria) : [];
+         foreach ($criteria as $id => $criterion) {
+             $criterion['class'] = $this->get_css_class_suffix($cnt++, count($criteria) - 1);
+             $criterion['id'] = $id;
++            $criterion['weightpercent'] = $weightpercentages[$id] ?? null;
+ 
+             $levelsstr = '';
+             $levelcnt = 0;
+@@ -870,4 +885,59 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             'gradingform_rubric_ranges', (object)$scores), 'info');
+         return $html;
+     }
++
++    /**
++     * IED extension: returns the html displaying the weight of a criterion.
++     *
++     * Expressions {NAME} and {CRITERION-id} are replaced by criterion_template().
++     * The weight is only shown to people who can grade or manage the rubric.
++     *
++     * @param int $mode rubric display mode
++     * @param array $criterion criterion data, optionally with 'weight' and 'weightpercent'
++     * @return string
++     */
++    protected function weight_template($mode, $criterion) {
++        if (!features::weighting_enabled()) {
++            return '';
++        }
++        $weight = weights::clamp($criterion['weight'] ?? weights::DEFAULT);
++        $percent = isset($criterion['weightpercent']) ? format_float($criterion['weightpercent'], 1, true, true) : '';
++        $summary = get_string('weightsummary', 'gradingform_rubric_ranges', (object) [
++            'weight' => $weight,
++            'percent' => $percent,
++        ]);
++
++        switch ($mode) {
++            case gradingform_rubric_ranges_controller::DISPLAY_EDIT_FULL:
++                $options = array_combine(range(weights::MIN, weights::MAX), range(weights::MIN, weights::MAX));
++                $select = html_writer::select($options, '{NAME}[criteria][{CRITERION-id}][weight]', $weight, false, [
++                    'id' => '{NAME}-criteria-{CRITERION-id}-weight',
++                    'class' => 'custom-select weightselect',
++                ]);
++                $html = html_writer::label(get_string('weight', 'gradingform_rubric_ranges'),
++                    '{NAME}-criteria-{CRITERION-id}-weight');
++                $html .= $select;
++                $html .= html_writer::span($percent === '' ? '' :
++                    get_string('weightpercent', 'gradingform_rubric_ranges', $percent), 'weightpercent');
++                return html_writer::div($html, 'weight');
++
++            case gradingform_rubric_ranges_controller::DISPLAY_EDIT_FROZEN:
++                $hidden = html_writer::empty_tag('input', [
++                    'type' => 'hidden',
++                    'name' => '{NAME}[criteria][{CRITERION-id}][weight]',
++                    'value' => $weight,
++                ]);
++                return $hidden . html_writer::div($summary, 'weight');
++
++            case gradingform_rubric_ranges_controller::DISPLAY_PREVIEW:
++            case gradingform_rubric_ranges_controller::DISPLAY_EVAL:
++            case gradingform_rubric_ranges_controller::DISPLAY_EVAL_FROZEN:
++            case gradingform_rubric_ranges_controller::DISPLAY_REVIEW:
++                return html_writer::div($summary, 'weight');
++
++            default:
++                // Students (DISPLAY_VIEW, DISPLAY_PREVIEW_GRADED) and print do not see weights.
++                return '';
++        }
++    }
+ }
+diff --git a/rubricrangeseditor.php b/rubricrangeseditor.php
+index 8b3d099..45d894e 100644
+--- a/rubricrangeseditor.php
++++ b/rubricrangeseditor.php
+@@ -123,6 +123,10 @@ class MoodleQuickForm_rubricrangeseditor extends HTML_QuickForm_input {
+                     'leveltemplate' => $renderer->level_template($mode, $data['options'], $this->getName())
+                    )),
+                 true, $module);
++            // IED extension: live weight percentages.
++            if (\gradingform_rubric_ranges\local\features::weighting_enabled()) {
++                $PAGE->requires->js_call_amd('gradingform_rubric_ranges/weights_editor', 'init', [$this->getName()]);
++            }
+         } else {
+             // Rubric is frozen, no javascript needed.
+             if ($this->_persistantFreeze) {
+@@ -329,6 +333,11 @@ class MoodleQuickForm_rubricrangeseditor extends HTML_QuickForm_input {
+             $return['criteria'][$id]['isranged'] = (isset($return['criteria'][$id]['isranged'])
+                 && ($return['criteria'][$id]['isranged'] == 1))
+                 ? 1 : 0;
++            // IED extension: normalise the weight only when submitted, never add a default one.
++            if (array_key_exists('weight', $return['criteria'][$id])) {
++                $return['criteria'][$id]['weight'] = \gradingform_rubric_ranges\local\weights::clamp(
++                    $return['criteria'][$id]['weight']);
++            }
+         }
+ 
+         // Create validation error string (if needed).
+diff --git a/styles.css b/styles.css
+index a3775da..235c8b9 100644
+--- a/styles.css
++++ b/styles.css
+@@ -310,3 +310,23 @@
+ .path-mod-assign [data-region="grade-panel"] .fitem.popout .gradingform_rubric_ranges .remark textarea {
+     width: 200px;
+ }
++
++/* IED extension: criteria weighting. */
++.gradingform_rubric_ranges .criterion .description .weight {
++    margin: 0.25em 0;
++    font-weight: normal;
++    font-size: 0.9em;
++}
++
++.gradingform_rubric_ranges .criterion .description .weight label {
++    margin: 0 0.5em 0 0;
++}
++
++.gradingform_rubric_ranges .criterion .description .weight .weightselect {
++    width: auto;
++}
++
++.gradingform_rubric_ranges .criterion .description .weight .weightpercent {
++    margin-left: 0.5em;
++    color: #575;
++}
+-- 
+2.39.2.windows.1
+

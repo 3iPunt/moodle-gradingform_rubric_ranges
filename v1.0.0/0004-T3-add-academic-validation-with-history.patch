@@ -1,0 +1,845 @@
+From 6bcbba80971dcd069fb48abd0664f826f08b1ef0 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 16:18:41 +0200
+Subject: [PATCH 4/9] T3: add academic validation with history
+
+- A grade can be validated once by a user with
+  gradingform/rubric_ranges:validate who is not its grader. The validator
+  grade and feedback replace the teacher ones; the original teacher grade,
+  level, feedback and grader are kept in gradingform_rubric_ranges_h
+  (validation_history persistent) with the validator and the date.
+- validation_manager decides one state per user and grade (off, normal,
+  validated, not graded, self, pending) used both to render and to save.
+- Locked submissions are ignored on the server and keep the current grade;
+  the submitter copy of the grading instance is discarded so the
+  validator never becomes the grader. Validated grades are read only.
+- Site admins are not validators unless a role grants the capability.
+- "Validate" button (AMD validation) swaps the read only teacher rubric
+  for the editable one. Graders see who validated and the original grade;
+  students do not see the validation.
+- New event grade_validated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                            |  21 +++
+ amd/build/validation.min.js           |   3 +
+ amd/build/validation.min.js.map       |   1 +
+ amd/src/validation.js                 |  48 +++++
+ classes/event/grade_validated.php     | 103 ++++++++++
+ classes/local/validation_manager.php  | 260 ++++++++++++++++++++++++++
+ lang/en/gradingform_rubric_ranges.php |   8 +
+ lib.php                               |  51 ++++-
+ renderer.php                          | 146 ++++++++++++++-
+ styles.css                            |   8 +
+ 10 files changed, 646 insertions(+), 3 deletions(-)
+ create mode 100644 amd/build/validation.min.js
+ create mode 100644 amd/build/validation.min.js.map
+ create mode 100644 amd/src/validation.js
+ create mode 100644 classes/event/grade_validated.php
+ create mode 100644 classes/local/validation_manager.php
+
+diff --git a/PATCHES.md b/PATCHES.md
+index e8ee4d8..12e85f7 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -28,6 +28,7 @@ One commit per task, applied in order:
+ | `0001-T0-…` | Infrastructure: settings page, validate capability, weights and validation history tables with their persistent classes |
+ | `0002-T1-…` | Criteria weighting (editor, weight display, persistence, regrade on weight change) and upstream regrade fix |
+ | `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
++| `0004-T3-…` | Academic validation with history and `grade_validated` event |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -104,6 +105,26 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+ - Known upstream limitation kept as is: in `DISPLAY_EVAL_FROZEN` the points cell is not rendered, so only the
+   hidden level travels (the stored grade is kept).
+ 
++## Notes on academic validation
++
++- A grade (grading item) can be validated **once**, optionally, by a user with
++  `gradingform/rubric_ranges:validate` who is not the grader of the current grade (no self validation).
++- Site administrators are **not** validators by default: the capability is checked without "do anything",
++  so they need a role that grants it explicitly.
++- Flow: the teacher grades; the validator opens the grading form, sees the teacher grade read only and clicks
++  "Validate"; the validator grade and feedback replace the teacher ones and the original teacher grade, level
++  and feedback are kept in `gradingform_rubric_ranges_h` with the validator and the date.
++- A grade is validated when it has history. Then it is read only for everybody: any submission is ignored and
++  the current grade is kept (an empty submission never wipes it).
++- A validator cannot give the first grade: when the teacher has not graded yet, the rubric is read only.
++- Saving without clicking "Validate" keeps the teacher grade.
++- Graders see "Grade validated by…" and the original grade of each criterion; students do not see the validation.
++- The `\gradingform_rubric_ranges\event\grade_validated` event identifies the graded item by `other.itemid`
++  (there is no generic API to get the student from it, so `relateduserid` is not set).
++- JavaScript is required to validate. Validation from the grader side panel is out of scope, but the lock
++  also applies there.
++- With `enablevalidation` disabled the plugin behaves as upstream, even for grades validated before.
++
+ ## Upstream fixes included
+ 
+ - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+diff --git a/amd/build/validation.min.js b/amd/build/validation.min.js
+new file mode 100644
+index 0000000..b4629dc
+--- /dev/null
++++ b/amd/build/validation.min.js
+@@ -0,0 +1,3 @@
++define("gradingform_rubric_ranges/validation",["exports"],(function(_exports){Object.defineProperty(_exports,"__esModule",{value:!0}),_exports.init=void 0;_exports.init=name=>{const button=document.getElementById("".concat(name,"-validate-button")),review=document.getElementById("".concat(name,"-validation-review")),editable=document.getElementById("".concat(name,"-validation-editable")),flag=document.getElementById("".concat(name,"-validate"));button&&review&&editable&&flag&&button.addEventListener("click",(()=>{var _editable$querySelect;review.hidden=!0,button.hidden=!0,editable.hidden=!1,flag.value="1",null===(_editable$querySelect=editable.querySelector("input:not([type=hidden]), textarea"))||void 0===_editable$querySelect||_editable$querySelect.focus()}))}}));
++
++//# sourceMappingURL=validation.min.js.map
+\ No newline at end of file
+diff --git a/amd/build/validation.min.js.map b/amd/build/validation.min.js.map
+new file mode 100644
+index 0000000..50ad7dd
+--- /dev/null
++++ b/amd/build/validation.min.js.map
+@@ -0,0 +1 @@
++{"version":3,"file":"validation.min.js","sources":["../src/validation.js"],"sourcesContent":["// This file is part of Moodle - http://moodle.org/\n//\n// Moodle is free software: you can redistribute it and/or modify\n// it under the terms of the GNU General Public License as published by\n// the Free Software Foundation, either version 3 of the License, or\n// (at your option) any later version.\n//\n// Moodle is distributed in the hope that it will be useful,\n// but WITHOUT ANY WARRANTY; without even the implied warranty of\n// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n// GNU General Public License for more details.\n//\n// You should have received a copy of the GNU General Public License\n// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.\n\n/**\n * IED extension: \"Validate\" button of the academic validation.\n *\n * The teacher grade is shown read only. Clicking the button shows the editable rubric and flags the\n * submission as a validation. The server ignores any submission without the flag.\n *\n * @module     gradingform_rubric_ranges/validation\n * @copyright  2026 Tresipunt\n * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later\n */\n\n/**\n * Initialises the validate button of a grading element.\n *\n * @param {String} name the grading element name\n */\nexport const init = (name) => {\n    const button = document.getElementById(`${name}-validate-button`);\n    const review = document.getElementById(`${name}-validation-review`);\n    const editable = document.getElementById(`${name}-validation-editable`);\n    const flag = document.getElementById(`${name}-validate`);\n    if (!button || !review || !editable || !flag) {\n        return;\n    }\n\n    button.addEventListener('click', () => {\n        review.hidden = true;\n        button.hidden = true;\n        editable.hidden = false;\n        flag.value = '1';\n        editable.querySelector('input:not([type=hidden]), textarea')?.focus();\n    });\n};\n"],"names":["name","button","document","getElementById","review","editable","flag","addEventListener","hidden","value","querySelector","focus"],"mappings":"yKA+BqBA,aACXC,OAASC,SAASC,yBAAkBH,0BACpCI,OAASF,SAASC,yBAAkBH,4BACpCK,SAAWH,SAASC,yBAAkBH,8BACtCM,KAAOJ,SAASC,yBAAkBH,mBACnCC,QAAWG,QAAWC,UAAaC,MAIxCL,OAAOM,iBAAiB,SAAS,+BAC7BH,OAAOI,QAAS,EAChBP,OAAOO,QAAS,EAChBH,SAASG,QAAS,EAClBF,KAAKG,MAAQ,kCACbJ,SAASK,cAAc,8FAAuCC"}
+\ No newline at end of file
+diff --git a/amd/src/validation.js b/amd/src/validation.js
+new file mode 100644
+index 0000000..4193de2
+--- /dev/null
++++ b/amd/src/validation.js
+@@ -0,0 +1,48 @@
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++/**
++ * IED extension: "Validate" button of the academic validation.
++ *
++ * The teacher grade is shown read only. Clicking the button shows the editable rubric and flags the
++ * submission as a validation. The server ignores any submission without the flag.
++ *
++ * @module     gradingform_rubric_ranges/validation
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++
++/**
++ * Initialises the validate button of a grading element.
++ *
++ * @param {String} name the grading element name
++ */
++export const init = (name) => {
++    const button = document.getElementById(`${name}-validate-button`);
++    const review = document.getElementById(`${name}-validation-review`);
++    const editable = document.getElementById(`${name}-validation-editable`);
++    const flag = document.getElementById(`${name}-validate`);
++    if (!button || !review || !editable || !flag) {
++        return;
++    }
++
++    button.addEventListener('click', () => {
++        review.hidden = true;
++        button.hidden = true;
++        editable.hidden = false;
++        flag.value = '1';
++        editable.querySelector('input:not([type=hidden]), textarea')?.focus();
++    });
++};
+diff --git a/classes/event/grade_validated.php b/classes/event/grade_validated.php
+new file mode 100644
+index 0000000..48461c1
+--- /dev/null
++++ b/classes/event/grade_validated.php
+@@ -0,0 +1,103 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\event;
++
++/**
++ * Event triggered when a grade given with a ranged rubric is validated.
++ *
++ * The graded item is identified by other['itemid'] (grading_instances.itemid): there is no generic API
++ * to get the graded user from it, so relateduserid is not set.
++ *
++ * @property-read array $other {
++ *      - int itemid: grading item
++ *      - int instanceid: grading instance saved by the validator
++ *      - int criteria: number of criteria validated
++ *      - int teacherid: grader of the original grade
++ * }
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++class grade_validated extends \core\event\base {
++
++    /**
++     * Init method.
++     */
++    protected function init() {
++        $this->data['crud'] = 'u';
++        $this->data['edulevel'] = self::LEVEL_TEACHING;
++        $this->data['objecttable'] = 'gradingform_rubric_ranges_h';
++    }
++
++    /**
++     * Returns localised general event name.
++     *
++     * @return string
++     */
++    public static function get_name() {
++        return get_string('eventgradevalidated', 'gradingform_rubric_ranges');
++    }
++
++    /**
++     * Returns non-localised event description.
++     *
++     * @return string
++     */
++    public function get_description() {
++        return "The user with id '{$this->userid}' validated the grade of the grading item with id " .
++            "'{$this->other['itemid']}' given by the user with id '{$this->other['teacherid']}' " .
++            "in the course module with id '{$this->contextinstanceid}'.";
++    }
++
++    /**
++     * Custom validation.
++     *
++     * @throws \coding_exception
++     */
++    protected function validate_data() {
++        parent::validate_data();
++        foreach (['itemid', 'instanceid', 'criteria', 'teacherid'] as $key) {
++            if (!isset($this->other[$key])) {
++                throw new \coding_exception("The '{$key}' value must be set in other.");
++            }
++        }
++    }
++
++    /**
++     * Mapping of the object for backup/restore.
++     *
++     * @return array
++     */
++    public static function get_objectid_mapping() {
++        return ['db' => 'gradingform_rubric_ranges_h', 'restore' => \core\event\base::NOT_MAPPED];
++    }
++
++    /**
++     * Mapping of the other fields for backup/restore.
++     *
++     * @return array
++     */
++    public static function get_other_mapping() {
++        return [
++            'itemid' => \core\event\base::NOT_MAPPED,
++            'instanceid' => \core\event\base::NOT_MAPPED,
++            'criteria' => \core\event\base::NOT_MAPPED,
++            'teacherid' => ['db' => 'user', 'restore' => 'user'],
++        ];
++    }
++}
+diff --git a/classes/local/validation_manager.php b/classes/local/validation_manager.php
+new file mode 100644
+index 0000000..f5feb68
+--- /dev/null
++++ b/classes/local/validation_manager.php
+@@ -0,0 +1,260 @@
++<?php
++// This file is part of Moodle - http://moodle.org/
++//
++// Moodle is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Moodle is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
++
++namespace gradingform_rubric_ranges\local;
++
++use gradingform_instance;
++use gradingform_rubric_ranges\event\grade_validated;
++use gradingform_rubric_ranges\persistent\validation_history;
++use gradingform_rubric_ranges_instance;
++
++/**
++ * Business rules of the academic validation.
++ *
++ * A grade (grading item) can be validated once by a user with gradingform/rubric_ranges:validate who is not
++ * the grader. The validator grade and feedback replace the teacher ones, which are kept in the validation
++ * history. A grade is validated when it has history; then nobody can change it.
++ *
++ * @package    gradingform_rubric_ranges
++ * @copyright  2026 Tresipunt
++ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
++ */
++final class validation_manager {
++
++    /** @var string Capability to validate grades. */
++    const CAPABILITY = 'gradingform/rubric_ranges:validate';
++
++    /** @var string Validation disabled: upstream behaviour. */
++    const STATE_OFF = 'off';
++
++    /** @var string User without the validate capability: upstream behaviour. */
++    const STATE_NORMAL = 'normal';
++
++    /** @var string The grade is validated: read only for everybody. */
++    const STATE_VALIDATED = 'validated';
++
++    /** @var string Validator and the teacher has not graded yet: read only. */
++    const STATE_NOT_GRADED = 'notgraded';
++
++    /** @var string Validator who gave the current grade: upstream behaviour (no self validation). */
++    const STATE_SELF = 'self';
++
++    /** @var string Validator and a grade of another teacher waiting for validation. */
++    const STATE_PENDING = 'pending';
++
++    /**
++     * Whether the user can validate grades in the context.
++     *
++     * @param \context $context
++     * @param int|null $userid
++     * @return bool
++     */
++    public static function can_validate(\context $context, ?int $userid = null): bool {
++        return features::validation_enabled() && self::has_validate_capability($context, $userid);
++    }
++
++    /**
++     * Whether the user has the validate capability.
++     *
++     * Site administrators are not validators by default ($doanything = false): otherwise they could not
++     * give the first grade. They need a role granting the capability explicitly.
++     *
++     * @param \context $context
++     * @param int|null $userid
++     * @return bool
++     */
++    private static function has_validate_capability(\context $context, ?int $userid): bool {
++        return has_capability(self::CAPABILITY, $context, $userid, false);
++    }
++
++    /**
++     * Whether the grade of the item has been validated.
++     *
++     * @param int $itemid grading item (grading_instances.itemid)
++     * @return bool
++     */
++    public static function is_validated(int $itemid): bool {
++        return validation_history::record_exists_select('itemid = :itemid', ['itemid' => $itemid]);
++    }
++
++    /**
++     * Returns the validation history of an item.
++     *
++     * @param int $itemid
++     * @return validation_history[] criterionid => history
++     */
++    public static function get_history(int $itemid): array {
++        $history = [];
++        foreach (validation_history::get_records(['itemid' => $itemid]) as $record) {
++            $history[$record->get('criterionid')] = $record;
++        }
++        return $history;
++    }
++
++    /**
++     * Returns the current graded instance of the item of the given instance (ACTIVE or NEEDUPDATE with filling).
++     *
++     * @param gradingform_rubric_ranges_instance $instance
++     * @return gradingform_rubric_ranges_instance|null
++     */
++    public static function get_current_graded_instance(gradingform_rubric_ranges_instance $instance) {
++        $current = $instance->get_current_instance();
++        if (!$current || empty($current->get_rubric_filling()['criteria'])) {
++            return null;
++        }
++        return $current;
++    }
++
++    /**
++     * Returns the validation state of an instance for a user.
++     *
++     * @param gradingform_rubric_ranges_instance $instance
++     * @param int $userid
++     * @return string one of the STATE_* constants
++     */
++    public static function get_state(gradingform_rubric_ranges_instance $instance, int $userid): string {
++        if (!features::validation_enabled()) {
++            return self::STATE_OFF;
++        }
++        $itemid = (int) $instance->get_data('itemid');
++        if ($itemid && self::is_validated($itemid)) {
++            return self::STATE_VALIDATED;
++        }
++        if (!self::has_validate_capability($instance->get_controller()->get_context(), $userid)) {
++            return self::STATE_NORMAL;
++        }
++        $current = self::get_current_graded_instance($instance);
++        if (!$current) {
++            return self::STATE_NOT_GRADED;
++        }
++        if ((int) $current->get_data('raterid') === $userid) {
++            return self::STATE_SELF;
++        }
++        return self::STATE_PENDING;
++    }
++
++    /**
++     * Whether a submission must be ignored in the given state.
++     *
++     * @param string $state
++     * @param mixed $elementvalue submitted value of the grading element
++     * @return bool
++     */
++    public static function is_locked(string $state, $elementvalue): bool {
++        if ($state === self::STATE_VALIDATED || $state === self::STATE_NOT_GRADED) {
++            return true;
++        }
++        return $state === self::STATE_PENDING && empty($elementvalue['validate']);
++    }
++
++    /**
++     * Ignores a submission: discards the copy of the instance and returns the current grade.
++     *
++     * The copy is discarded instead of activated so the submitter does not become the grader.
++     *
++     * @param gradingform_rubric_ranges_instance $instance
++     * @return float|int current grade, -1 when there is none
++     */
++    public static function keep_current_grade(gradingform_rubric_ranges_instance $instance) {
++        $current = self::get_current_graded_instance($instance);
++        if ($instance->get_status() == gradingform_instance::INSTANCE_STATUS_INCOMPLETE) {
++            $instance->cancel();
++        }
++        return $current ? $current->get_grade() : -1;
++    }
++
++    /**
++     * Stores the validation history once the validator filling has been saved.
++     *
++     * @param gradingform_rubric_ranges_instance $validated instance saved by the validator
++     * @param gradingform_rubric_ranges_instance $teacher instance graded by the teacher
++     * @param int $validatorid
++     */
++    public static function record_validation(gradingform_rubric_ranges_instance $validated,
++            gradingform_rubric_ranges_instance $teacher, int $validatorid): void {
++        $controller = $validated->get_controller();
++        $teacherfilling = $teacher->get_rubric_filling()['criteria'];
++        $validatedfilling = $validated->get_rubric_filling(true)['criteria'];
++        $itemid = (int) $validated->get_data('itemid');
++        $now = time();
++
++        $first = null;
++        foreach (array_keys($controller->get_definition()->rubric_criteria) as $criterionid) {
++            $original = $teacherfilling[$criterionid] ?? [];
++            $new = $validatedfilling[$criterionid] ?? [];
++            $record = new validation_history(0, (object) [
++                'itemid' => $itemid,
++                'instanceid' => $validated->get_id(),
++                'criterionid' => $criterionid,
++                'teacherlevelid' => self::int_or_null($original['levelid'] ?? null),
++                'teachergrade' => self::int_or_null($original['grade'] ?? null),
++                'teacherremark' => $original['remark'] ?? null,
++                'teacherremarkformat' => self::int_or_null($original['remarkformat'] ?? null),
++                'teacherid' => (int) $teacher->get_data('raterid'),
++                'validatedlevelid' => self::int_or_null($new['levelid'] ?? null),
++                'validatedgrade' => self::int_or_null($new['grade'] ?? null),
++                'validatedremark' => $new['remark'] ?? null,
++                'validatorid' => $validatorid,
++                'timevalidated' => $now,
++            ]);
++            $record->create();
++            $first = $first ?? $record;
++        }
++
++        if ($first) {
++            grade_validated::create([
++                'context' => $controller->get_context(),
++                'objectid' => $first->get('id'),
++                'userid' => $validatorid,
++                'other' => [
++                    'itemid' => $itemid,
++                    'instanceid' => $validated->get_id(),
++                    'criteria' => count($controller->get_definition()->rubric_criteria),
++                    'teacherid' => (int) $teacher->get_data('raterid'),
++                ],
++            ])->trigger();
++        }
++    }
++
++    /**
++     * Deletes the validation history of the given criteria.
++     *
++     * @param int[] $criterionids
++     */
++    public static function delete_for_criteria(array $criterionids): void {
++        global $DB;
++
++        $criterionids = array_filter(array_map('intval', $criterionids));
++        if (empty($criterionids)) {
++            return;
++        }
++        // Only builds the SQL fragment, the query is run by the persistent.
++        [$insql, $params] = $DB->get_in_or_equal($criterionids, SQL_PARAMS_NAMED);
++        foreach (validation_history::get_records_select("criterionid $insql", $params) as $record) {
++            $record->delete();
++        }
++    }
++
++    /**
++     * Casts a value to int keeping nulls and empty strings as null.
++     *
++     * @param mixed $value
++     * @return int|null
++     */
++    private static function int_or_null($value): ?int {
++        return ($value === null || $value === '') ? null : (int) $value;
++    }
++}
+diff --git a/lang/en/gradingform_rubric_ranges.php b/lang/en/gradingform_rubric_ranges.php
+index 29dcd27..0f3ba70 100644
+--- a/lang/en/gradingform_rubric_ranges.php
++++ b/lang/en/gradingform_rubric_ranges.php
+@@ -116,12 +116,20 @@ $string['enablevalidation'] = 'Enable academic validation';
+ $string['enablevalidation_help'] = 'If enabled, users with the capability \'gradingform/rubric_ranges:validate\' can validate a grade once: the validator grade and feedback replace the teacher ones, which are kept in the validation history.';
+ $string['enableweighting'] = 'Enable criteria weighting';
+ $string['enableweighting_help'] = 'If enabled, every criterion has a weight from 1 to 10 and the final grade is the weighted average of the criteria. When all criteria have the same weight and maximum score the grade is the same as without weighting.';
++$string['eventgradevalidated'] = 'Ranged rubric grade validated';
+ $string['gradeinput'] = 'Grade for criterion {$a}';
+ $string['numericnoremarks'] = 'Numeric grading is enabled but remarks are not allowed in this rubric, so the feedback of the level will not be applied automatically. Tick "Allow grader to add text remarks for each criterion" to enable it.';
+ $string['rubric_ranges:validate'] = 'Validate ranged rubric grades';
+ $string['settingforced'] = 'This setting is defined in config.php and cannot be changed here.';
+ $string['settingspage'] = 'Ranged rubric settings';
+ $string['settingssaved'] = 'Changes saved';
++$string['validate'] = 'Validate';
++$string['validatedby'] = 'Grade validated by {$a->validator} on {$a->date}. It cannot be changed.';
++$string['validationnojs'] = 'JavaScript is required to validate the grade.';
++$string['validationnotgraded'] = 'The teacher has not graded yet, so there is nothing to validate.';
++$string['validationoriginal'] = 'Original grade: {$a->grade} · {$a->level} · {$a->teacher}';
++$string['validationoriginalremark'] = 'Original feedback: {$a}';
++$string['validationpending'] = 'This grade is pending validation. Review it and click "Validate" to change the grade and feedback. Saving without validating keeps the teacher grade.';
+ $string['weight'] = 'Weight';
+ $string['weightpercent'] = '{$a} %';
+ $string['weightsummary'] = 'Weight {$a->weight} · {$a->percent} %';
+diff --git a/lib.php b/lib.php
+index 3b8b93f..2e3e748 100644
+--- a/lib.php
++++ b/lib.php
+@@ -34,6 +34,7 @@ use core_external\external_multiple_structure;
+ use core_external\external_format_value;
+ use gradingform_rubric_ranges\local\features;
+ use gradingform_rubric_ranges\local\range_resolver;
++use gradingform_rubric_ranges\local\validation_manager;
+ use gradingform_rubric_ranges\local\weights;
+ 
+ /** rubric: Used to compare our gradeitem_type against. */
+@@ -298,6 +299,7 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+                         $DB->delete_records('gradingform_rubric_ranges_c', array('id' => $id));
+                         $DB->delete_records('gradingform_rubric_ranges_l', array('criterionid' => $id));
+                         weights::delete_for_criteria([$id]);
++                        validation_manager::delete_for_criteria([$id]);
+                     }
+                 }
+                 $haschanges[3] = true;
+@@ -724,8 +726,9 @@ class gradingform_rubric_ranges_controller extends gradingform_controller {
+             array('definitionid' => $this->definition->id), '', 'id'));
+         // Delete levels.
+         $DB->delete_records_list('gradingform_rubric_ranges_l', 'criterionid', $criteria);
+-        // IED extension: delete weights.
++        // IED extension: delete weights and validation history.
+         weights::delete_for_criteria($criteria);
++        validation_manager::delete_for_criteria($criteria);
+         // Delete critera.
+         $DB->delete_records_list('gradingform_rubric_ranges_c', 'id', $criteria);
+     }
+@@ -984,7 +987,12 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+      * @return boolean true if the form data is validated and contains no errors
+      */
+     public function validate_grading_element($elementvalue) {
++        global $USER;
+         $criteria = $this->get_controller()->get_definition()->rubric_criteria;
++        // IED extension: a locked submission (academic validation) is ignored, so it is always valid.
++        if (validation_manager::is_locked(validation_manager::get_state($this, (int) $USER->id), $elementvalue)) {
++            return true;
++        }
+         // IED extension: numeric grading validates the grade of each criterion.
+         if (features::numericgrading_enabled()) {
+             return range_resolver::validate_filling($criteria, $elementvalue);
+@@ -1068,6 +1076,36 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+         $this->get_rubric_filling(true);
+     }
+ 
++    /**
++     * IED extension: applies the academic validation rules before saving the grade.
++     *
++     * Locked submissions are ignored and keep the current grade. A validation stores the validator
++     * filling and the original teacher filling in the validation history in one transaction.
++     *
++     * @param array $elementvalue value of element submitted from the form
++     * @param int $itemid
++     * @return float|int the grade, -1 when there is none
++     */
++    public function submit_and_get_grade($elementvalue, $itemid) {
++        global $DB, $USER;
++
++        $state = validation_manager::get_state($this, (int) $USER->id);
++        if (validation_manager::is_locked($state, $elementvalue) ||
++                ($state === validation_manager::STATE_PENDING && $this->is_empty_form($elementvalue))) {
++            return validation_manager::keep_current_grade($this);
++        }
++        if ($state !== validation_manager::STATE_PENDING) {
++            return parent::submit_and_get_grade($elementvalue, $itemid);
++        }
++
++        $teacher = validation_manager::get_current_graded_instance($this);
++        $transaction = $DB->start_delegated_transaction();
++        $grade = parent::submit_and_get_grade($elementvalue, $itemid);
++        validation_manager::record_validation($this, $teacher, (int) $USER->id);
++        $transaction->allow_commit();
++        return $grade;
++    }
++
+     /**
+      * Calculates the grade to be pushed to the gradebook
+      *
+@@ -1202,6 +1240,17 @@ class gradingform_rubric_ranges_instance extends gradingform_instance {
+             $html .= html_writer::tag('div', $this->get_controller()->get_formatted_description(),
+                 array('class' => 'gradingform_rubric_ranges-description'));
+         }
++        // IED extension: academic validation states replace the editable rubric.
++        $state = validation_manager::get_state($this, (int) $USER->id);
++        $validatable = $state === validation_manager::STATE_PENDING && !$gradingformelement->_flagFrozen;
++        if ($validatable || in_array($state, [validation_manager::STATE_VALIDATED, validation_manager::STATE_NOT_GRADED])) {
++            if ($state === validation_manager::STATE_PENDING) {
++                $page->requires->js_call_amd('gradingform_rubric_ranges/validation', 'init', [$gradingformelement->getName()]);
++            }
++            $history = validation_manager::get_history((int) $this->get_data('itemid'));
++            return $html . $this->get_controller()->get_renderer($page)->display_validation_element(
++                $state, $criteria, $options, $gradingformelement->getName(), $value, $history);
++        }
+         $html .= $this->get_controller()->get_renderer($page)->display_rubric(
+             $criteria, $options, $mode, $gradingformelement->getName(), $value
+         );
+diff --git a/renderer.php b/renderer.php
+index baf7fad..d4b0d0a 100644
+--- a/renderer.php
++++ b/renderer.php
+@@ -24,6 +24,7 @@
+ 
+ use gradingform_rubric_ranges\local\features;
+ use gradingform_rubric_ranges\local\range_resolver;
++use gradingform_rubric_ranges\local\validation_manager;
+ use gradingform_rubric_ranges\local\weights;
+ 
+ /**
+@@ -169,8 +170,8 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         }
+ 
+         // Description cell.
+-        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description,
+-            $descriptiontdparams);
++        $criteriontemplate .= html_writer::tag('td', $rangedchktemplate . $this->weight_template($mode, $criterion) . $description
++            . $this->validation_template($mode, $value), $descriptiontdparams);
+ 
+         // Levels table.
+         $levelsrowparams = array('id' => '{NAME}-criteria-{CRITERION-id}-levels');
+@@ -853,6 +854,12 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+             $showdescription = $options['showdescriptionstudent'];
+         }
+         $output = '';
++        // IED extension: graders see the validation of the grade, students do not.
++        if ($cangrade && features::validation_enabled()) {
++            $history = validation_manager::get_history((int) $instance->get_data('itemid'));
++            $output .= $this->validation_badge($history);
++            $values = $this->add_validation_values($values, $criteria, $history);
++        }
+         if ($showdescription) {
+             $output .= $this->box($instance->get_controller()->get_formatted_description(),
+                 'gradingform_rubric_ranges-description');
+@@ -1040,4 +1047,139 @@ class gradingform_rubric_ranges_renderer extends plugin_renderer_base {
+         }
+         return $this->output->notification(get_string('numericnoremarks', 'gradingform_rubric_ranges'), 'warning');
+     }
++
++    /**
++     * IED extension: returns the grading element for the locked academic validation states.
++     *
++     * The read only copies use the element name with a "-review" suffix so they do not clash with the
++     * ids used by the upstream YUI module and the editable rubric.
++     *
++     * @param string $state validation_manager::STATE_VALIDATED, STATE_NOT_GRADED or STATE_PENDING
++     * @param array $criteria rubric criteria
++     * @param array $options rubric options
++     * @param string $elementname grading element name
++     * @param array|null $values current filling
++     * @param array $history validation history (criterionid => validation_history)
++     * @return string
++     */
++    public function display_validation_element($state, $criteria, $options, $elementname, $values, $history) {
++        $review = gradingform_rubric_ranges_controller::DISPLAY_REVIEW;
++        switch ($state) {
++            case validation_manager::STATE_VALIDATED:
++                return $this->validation_badge($history) .
++                    $this->display_rubric($criteria, $options, $review, $elementname . '-review',
++                        $this->add_validation_values($values, $criteria, $history));
++
++            case validation_manager::STATE_NOT_GRADED:
++                return $this->output->notification(get_string('validationnotgraded', 'gradingform_rubric_ranges'), 'info') .
++                    $this->display_rubric($criteria, $options, $review, $elementname . '-review');
++
++            case validation_manager::STATE_PENDING:
++                $html = $this->output->notification(get_string('validationpending', 'gradingform_rubric_ranges'), 'info');
++                $html .= html_writer::div(
++                    $this->display_rubric($criteria, $options, $review, $elementname . '-review', $values),
++                    '', ['id' => $elementname . '-validation-review']);
++                $html .= html_writer::tag('button', get_string('validate', 'gradingform_rubric_ranges'), [
++                    'type' => 'button',
++                    'id' => $elementname . '-validate-button',
++                    'class' => 'btn btn-primary mb-3',
++                ]);
++                $html .= html_writer::tag('noscript', get_string('validationnojs', 'gradingform_rubric_ranges'));
++                $editable = html_writer::empty_tag('input', [
++                    'type' => 'hidden',
++                    'name' => $elementname . '[validate]',
++                    'id' => $elementname . '-validate',
++                    'value' => 0,
++                ]);
++                $editable .= $this->display_rubric($criteria, $options, gradingform_rubric_ranges_controller::DISPLAY_EVAL,
++                    $elementname, $values);
++                $html .= html_writer::div($editable, '', ['id' => $elementname . '-validation-editable', 'hidden' => 'hidden']);
++                return $html;
++
++            default:
++                return '';
++        }
++    }
++
++    /**
++     * IED extension: returns the badge telling who validated the grade and when.
++     *
++     * @param array $history validation history (criterionid => validation_history)
++     * @return string
++     */
++    protected function validation_badge($history) {
++        if (empty($history)) {
++            return '';
++        }
++        $record = reset($history);
++        $a = (object) [
++            'validator' => $this->user_fullname($record->get('validatorid')),
++            'date' => userdate($record->get('timevalidated'), get_string('strftimedatetime', 'langconfig')),
++        ];
++        return $this->output->notification(get_string('validatedby', 'gradingform_rubric_ranges', $a), 'success', false);
++    }
++
++    /**
++     * IED extension: adds the original teacher grade of each criterion to the values to display.
++     *
++     * @param array|null $values current filling
++     * @param array $criteria rubric criteria
++     * @param array $history validation history (criterionid => validation_history)
++     * @return array|null
++     */
++    protected function add_validation_values($values, $criteria, $history) {
++        foreach ($history as $criterionid => $record) {
++            if (!isset($criteria[$criterionid])) {
++                continue;
++            }
++            $levelid = $record->get('teacherlevelid');
++            $level = $levelid ? ($criteria[$criterionid]['levels'][$levelid] ?? null) : null;
++            $grade = $record->get('teachergrade');
++            if ($grade === null && $level) {
++                $grade = $level['score'];
++            }
++            $values['criteria'][$criterionid]['validation'] = [
++                'grade' => $grade === null ? '-' : (0 + $grade),
++                'level' => $level ? $level['definition'] : '-',
++                'teacher' => $this->user_fullname($record->get('teacherid')),
++                'remark' => (string) $record->get('teacherremark'),
++            ];
++        }
++        return $values;
++    }
++
++    /**
++     * IED extension: returns the original teacher grade of a validated criterion (graders only).
++     *
++     * @param int $mode rubric display mode
++     * @param mixed $value criterion value, with 'validation' when the grade is validated
++     * @return string
++     */
++    protected function validation_template($mode, $value) {
++        if ($mode != gradingform_rubric_ranges_controller::DISPLAY_REVIEW || !is_array($value)
++                || empty($value['validation'])) {
++            return '';
++        }
++        $html = html_writer::div(get_string('validationoriginal', 'gradingform_rubric_ranges', (object) [
++            'grade' => $value['validation']['grade'],
++            'level' => s($value['validation']['level']),
++            'teacher' => s($value['validation']['teacher']),
++        ]), 'validationoriginal');
++        if ($value['validation']['remark'] !== '') {
++            $html .= html_writer::div(get_string('validationoriginalremark', 'gradingform_rubric_ranges',
++                s($value['validation']['remark'])), 'validationoriginalremark');
++        }
++        return html_writer::div($html, 'validation');
++    }
++
++    /**
++     * IED extension: full name of a user, or a placeholder when the user does not exist any more.
++     *
++     * @param int|null $userid
++     * @return string
++     */
++    protected function user_fullname($userid) {
++        $user = $userid ? \core_user::get_user($userid) : false;
++        return $user ? fullname($user) : get_string('unknownuser');
++    }
+ }
+diff --git a/styles.css b/styles.css
+index 70d3850..183e89c 100644
+--- a/styles.css
++++ b/styles.css
+@@ -336,3 +336,11 @@
+     display: inline-block;
+     width: 5em;
+ }
++
++/* IED extension: academic validation. */
++.gradingform_rubric_ranges .criterion .description .validation {
++    margin-top: 0.5em;
++    font-weight: normal;
++    font-size: 0.9em;
++    color: #6a737b;
++}
+-- 
+2.39.2.windows.1
+

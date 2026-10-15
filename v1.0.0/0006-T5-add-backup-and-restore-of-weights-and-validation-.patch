@@ -1,0 +1,219 @@
+From 0bbeff015eee3ac4a77555b29dc9d07b149726a6 Mon Sep 17 00:00:00 2001
+From: juanan <juanan@test.com>
+Date: Tue, 6 Oct 2026 17:14:38 +0200
+Subject: [PATCH 6/9] T5: add backup and restore of weights and validation
+ history
+
+- Weights are backed up as a child of each criterion, so they are copied
+  with or without user data.
+- The validation history is backed up as a child of each grading
+  instance (only with user data), annotating teacher and validator as
+  users. The persistent technical fields are regenerated on restore.
+- Restore remaps instance, criterion, levels, graded item (through the
+  grading manager API and the activity item mapping) and users, and saves
+  through the persistents. Rows whose criterion or item cannot be mapped
+  are skipped; unmapped users are left empty so the grade stays locked.
+- Old backups restore with weight 1 and no validation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PATCHES.md                                    | 14 +++
+ ...gradingform_rubric_ranges_plugin.class.php | 17 ++++
+ ...gradingform_rubric_ranges_plugin.class.php | 95 +++++++++++++++++++
+ 3 files changed, 126 insertions(+)
+
+diff --git a/PATCHES.md b/PATCHES.md
+index 221d615..65d322d 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -30,6 +30,7 @@ One commit per task, applied in order:
+ | `0003-T2-…` | Numeric grading per criterion with automatic level and feedback |
+ | `0004-T3-…` | Academic validation with history and `grade_validated` event |
+ | `0005-T4-…` | Weighted final grade |
++| `0006-T5-…` | Backup and restore of weights and validation history |
+ 
+ Further patches are added as each task is delivered.
+ 
+@@ -143,6 +144,19 @@ Flags: `enableweighting`, `enablenumericgrading`, `enablevalidation`. Changes ma
+   also applies there.
+ - With `enablevalidation` disabled the plugin behaves as upstream, even for grades validated before.
+ 
++## Notes on backup and restore
++
++- Weights hang from each criterion (`rubric_ranges_weight`): they are copied with or without user data.
++- The validation history hangs from each grading instance (`rubric_ranges_validations`): like the grades, it is
++  only copied with user data. Teacher and validator are annotated as users of the backup. The persistent
++  technical fields are regenerated on restore; `timevalidated` is kept.
++- On restore, instance, criterion, levels, graded item and users are remapped. A row whose criterion or graded
++  item cannot be mapped is skipped. When the teacher or the validator cannot be mapped the row is kept with an
++  empty user, so the grade stays validated and locked.
++- Backups made before the fork restore with weight 1 and no validation. Backups made with the fork restore as
++  upstream in a site with the upstream plugin (unknown elements are ignored). Duplicate and import (no user
++  data) copy the weights but not the history.
++
+ ## Upstream fixes included
+ 
+ - `update_definition()` read `rubric['regrade']` instead of `rubricranges['regrade']`, so instances were never
+diff --git a/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php b/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
+index db1bd75..9f76b05 100644
+--- a/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
++++ b/backup/moodle2/backup_gradingform_rubric_ranges_plugin.class.php
+@@ -71,6 +71,11 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin
+         $level->set_source_table('gradingform_rubric_ranges_l',
+                 array('criterionid' => backup::VAR_PARENTID));
+ 
++        // IED extension: weight of each criterion (part of the rubric design, copied with or without user data).
++        $weight = new backup_nested_element('rubric_ranges_weight', array('id'), array('weight'));
++        $criterion->add_child($weight);
++        $weight->set_source_table('gradingform_rubric_ranges_w', array('criterionid' => backup::VAR_PARENTID));
++
+         // No need to annotate ids or files yet (one day when criterion definition supports
+         // Embedded files, they must be annotated here).
+ 
+@@ -113,6 +118,18 @@ class backup_gradingform_rubric_ranges_plugin extends backup_gradingform_plugin
+                 WHERE rf.instanceid = :instanceid',
+                 array('instanceid' => backup::VAR_PARENTID));
+ 
++        // IED extension: validation history (instances are only backed up with user data).
++        // The persistent technical fields (usermodified, timecreated, timemodified) are regenerated on restore.
++        $validations = new backup_nested_element('rubric_ranges_validations');
++        $validation = new backup_nested_element('rubric_ranges_validation', array('id'), array(
++            'itemid', 'criterionid', 'teacherlevelid', 'teachergrade', 'teacherremark', 'teacherremarkformat',
++            'teacherid', 'validatedlevelid', 'validatedgrade', 'validatedremark', 'validatorid', 'timevalidated'));
++        $pluginwrapper->add_child($validations);
++        $validations->add_child($validation);
++        $validation->set_source_table('gradingform_rubric_ranges_h', array('instanceid' => backup::VAR_PARENTID));
++        $validation->annotate_ids('user', 'teacherid');
++        $validation->annotate_ids('user', 'validatorid');
++
+         // No need to annotate ids or files yet (one day when remark field supports.
+         // Embedded fileds, they must be annotated here).
+ 
+diff --git a/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php b/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
+index fed4cdb..a4d6d53 100644
+--- a/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
++++ b/backup/moodle2/restore_gradingform_rubric_ranges_plugin.class.php
+@@ -31,6 +31,9 @@
+  */
+ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugin {
+ 
++    /** @var array IED extension: area names by restored area id. */
++    protected $restoredareanames = [];
++
+     /**
+      * Declares the rubric XML paths attached to the form definition element
+      *
+@@ -46,6 +49,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+         $paths[] = new restore_path_element('gradingform_rubric_ranges_level',
+             $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_levels/rubric_ranges_level'));
+ 
++        // IED extension: criteria weights.
++        $paths[] = new restore_path_element('gradingform_rubric_ranges_weight',
++            $this->get_pathfor('/rubric_ranges_criteria/rubric_ranges_criterion/rubric_ranges_weight'));
++
+         return $paths;
+     }
+ 
+@@ -61,6 +68,10 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+         $paths[] = new restore_path_element('gradinform_rubric_ranges_filling',
+             $this->get_pathfor('/rubric_ranges_fillings/rubric_ranges_filling'));
+ 
++        // IED extension: validation history.
++        $paths[] = new restore_path_element('gradingform_rubric_ranges_validation',
++            $this->get_pathfor('/rubric_ranges_validations/rubric_ranges_validation'));
++
+         return $paths;
+     }
+ 
+@@ -118,4 +129,88 @@ class restore_gradingform_rubric_ranges_plugin extends restore_gradingform_plugi
+         }
+ 
+     }
++
++    /**
++     * IED extension: processes the weight of a criterion.
++     *
++     * @param stdClass|array $data
++     */
++    public function process_gradingform_rubric_ranges_weight($data) {
++        $data = (object) $data;
++        $criterionid = $this->get_new_parentid('gradingform_rubric_ranges_criterion');
++        if ($criterionid) {
++            \gradingform_rubric_ranges\local\weights::save($criterionid, $data->weight);
++        }
++    }
++
++    /**
++     * IED extension: processes one row of the validation history.
++     *
++     * Rows without criterion or graded item in the restored course are skipped. Users not included in the
++     * backup are left empty, so the grade stays validated (locked) and keeps its original grade and date.
++     *
++     * @param stdClass|array $data
++     */
++    public function process_gradingform_rubric_ranges_validation($data) {
++        $data = (object) $data;
++        $instanceid = $this->get_new_parentid('grading_instance');
++        $criterionid = $this->get_mappingid('gradingform_rubric_ranges_criterion', $data->criterionid);
++        $itemid = $this->get_mappingid(self::itemid_mapping($this->get_restored_areaname()), $data->itemid);
++        if (!$instanceid || !$criterionid || !$itemid) {
++            return;
++        }
++        $history = \gradingform_rubric_ranges\persistent\validation_history::class;
++        if ($history::record_exists_select('itemid = :itemid AND criterionid = :criterionid',
++                ['itemid' => $itemid, 'criterionid' => $criterionid])) {
++            // Already restored (e.g. restoring twice into the same course).
++            return;
++        }
++        $record = new $history(0, (object) [
++            'itemid' => $itemid,
++            'instanceid' => $instanceid,
++            'criterionid' => $criterionid,
++            'teacherlevelid' => $this->map_or_null('gradingform_rubric_ranges_level', $data->teacherlevelid),
++            'teachergrade' => $data->teachergrade,
++            'teacherremark' => $data->teacherremark,
++            'teacherremarkformat' => $data->teacherremarkformat,
++            'teacherid' => $this->map_or_null('user', $data->teacherid),
++            'validatedlevelid' => $this->map_or_null('gradingform_rubric_ranges_level', $data->validatedlevelid),
++            'validatedgrade' => $data->validatedgrade,
++            'validatedremark' => $data->validatedremark,
++            'validatorid' => $this->map_or_null('user', $data->validatorid) ?? 0,
++            'timevalidated' => $data->timevalidated,
++        ]);
++        $record->create();
++    }
++
++    /**
++     * IED extension: name of the grading area being restored, from the grading manager API.
++     *
++     * @return string
++     */
++    protected function get_restored_areaname() {
++        global $CFG;
++        require_once($CFG->dirroot . '/grade/grading/lib.php');
++
++        $areaid = (int) $this->get_new_parentid('grading_area');
++        if (!isset($this->restoredareanames[$areaid])) {
++            $this->restoredareanames[$areaid] = (string) get_grading_manager($areaid)->get_area();
++        }
++        return $this->restoredareanames[$areaid];
++    }
++
++    /**
++     * IED extension: maps an id, returning null when the value is empty or cannot be mapped.
++     *
++     * @param string $itemname
++     * @param mixed $oldid
++     * @return int|null
++     */
++    protected function map_or_null($itemname, $oldid) {
++        if (empty($oldid)) {
++            return null;
++        }
++        $newid = $this->get_mappingid($itemname, $oldid);
++        return $newid ? (int) $newid : null;
++    }
+ }
+-- 
+2.39.2.windows.1
+

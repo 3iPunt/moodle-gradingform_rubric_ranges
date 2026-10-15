@@ -1,0 +1,10 @@
+b427cfac885d228220ebb5f52b1e0e53da957d3adb2364fb21dace9a6fc429f3 *0001-T0-add-infrastructure-for-the-IED-extension.patch
+24655c0a4bf5d5b43749f9529ec00dc9e13b610e218c25406891bc0112d01cdb *0002-T1-add-criteria-weighting.patch
+77891b232ea847856e013e036cff9580e62f1ad1ec42ad6930bbfe1b66db8727 *0003-T2-add-numeric-grading-with-automatic-range-and-feed.patch
+2c6627cf5b3ab0e0837a436306572554b0d2c5712ef0dd13ab9e77162a13a06c *0004-T3-add-academic-validation-with-history.patch
+468f09a20b5b1af19c10ad5c94827e59e447d2f7ecf5301c20f715f860378836 *0005-T4-add-weighted-final-grade.patch
+f42d4d931d2f0982b9bd9eb53ee8054bfa204e392a723d5419306ed9a1b32c40 *0006-T5-add-backup-and-restore-of-weights-and-validation-.patch
+118cbabfc63d4d42a93d3c7a06d777533ba9bec73eb407c87ba7c02bdecfc781 *0007-T6-add-privacy-provider-for-the-IED-data.patch
+1089ca96f479d50d91ba1be85ca42e0bfac76927d0d8f9281f5410c6b1e8d5fe *0008-T7-add-PHPUnit-tests-of-the-IED-extension.patch
+f7d6c3a101e568449f0ea421a31667e12df300043ce28f64f413cab1e49efff7 *0009-T8-QA-hardening-of-the-IED-extension.patch
+b903f6c9549d9c8d93be9b2f8cc4a22fd95f1bfd2fbb1e2572d009709c4f1660 *PATCHES.md
